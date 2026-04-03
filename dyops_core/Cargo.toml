@@ -1,0 +1,16 @@
+[package]
+name = "dyops_core"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "dyops_core"
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+nalgebra = { version = "0.33", features = ["std"] }
+numpy = "0.23"
+pyo3 = { version = "0.23", features = ["extension-module"] }
+
+[profile.release]
+lto = true

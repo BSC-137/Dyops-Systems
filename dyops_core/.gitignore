@@ -1,0 +1,59 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+wheelhouse/
+pip-wheel-metadata/
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+
+# Environment & secrets
+.env
+.env.*
+!.env.example
+
+# Rust / Cargo
+dyops_core/target/
+**/target/
+
+# IDE & OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
+Thumbs.db
+
+# Streamlit
+.streamlit/secrets.toml
+
+# Runtime audit outputs (keep folder via .gitkeep)
+dyops_core/audits/*.json
+!dyops_core/audits/.gitkeep
+
+# Docs / scratch captures (optional local screenshots)
+*_diagnostic.png
+**/Screenshot*.png
+
+# Maturin / wheels from local dev
+*.whl
+
+# Logs & coverage
+*.log
+.coverage
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Cursor / agent (if symlinked into repo)
+.cursor/

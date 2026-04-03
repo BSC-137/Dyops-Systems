@@ -1,0 +1,32 @@
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "JetBrains Mono", ui-monospace, monospace;
+  --font-mono: "JetBrains Mono", ui-monospace, monospace;
+  --color-terminal: #09090b;
+  --color-panel: #0c0c0f;
+  --color-border: #27272a;
+  --color-muted: #a1a1aa;
+  --color-gold: #e4c465;
+  --color-cyan: #22d3ee;
+}
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+}
+
+body {
+  font-family: var(--font-sans);
+  background: var(--color-terminal);
+  color: #e4e4e7;
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Shadcn-style: numbers use tabular mono */
+.font-mono-nums {
+  font-family: var(--font-mono);
+  font-variant-numeric: tabular-nums;
+}
