@@ -1,8 +1,8 @@
 # Dyops Systems
 
-Dyops is an **institutional-style tokenized-asset basis monitoring** platform. It combines a **Rust + PyO3 Kalman filter** (mean-reverting Ornstein–Uhlenbeck-style basis dynamics), a Python **sentinel** layer for breach detection and optional **Gemini** risk audits, **SQLite** persistence for telemetry and audits, **live market data** from Binance over WebSockets, and two operator surfaces: a **React + Vite** terminal backed by **FastAPI** (recommended) and a legacy **Streamlit** dashboard in `dyops_core/`.
+Dyops is a **B2B-style tokenized-asset basis monitoring** stack: ingest paired prices, run a **Rust + PyO3 Kalman-style observer**, apply Python **sentinel** policies (Mahalanobis breach + rolling criticality), optionally escalate to **Gemini** audits, persist to **SQLite**, and expose everything through **FastAPI** (REST + WebSockets) and a **React + Vite** operator UI. **Deterministic replay explainability** (per-tick `reasoning`, pulse copy) is surfaced on the API for demos and integrations **without relying on Gemini**. A legacy **Streamlit** dashboard remains in [`dyops_core/dashboard.py`](dyops_core/dashboard.py).
 
-This document is the **top-level guide** to the repository layout, architecture, configuration, and how to run everything. For Rust-only build notes and quick commands scoped to the Python package, see [`dyops_core/README.md`](dyops_core/README.md).
+This document is the **top-level guide** to layout, architecture, configuration, explainability endpoints, UX behavior, and how to run everything. Rust/build notes scoped to the Python package live in [`dyops_core/README.md`](dyops_core/README.md).
 
 ---
 
@@ -82,7 +82,10 @@ flowchart LR
 | [`dyops_core/src/`](dyops_core/src/) | `observer.rs` (filter, ring buffer, batch updates), `lib.rs` (PyO3 exports) |
 | [`backend/main.py`](backend/main.py) | **FastAPI** app: lifespan, REST, WebSockets, integration with sentinel + feed + persistence |
 | [`backend/requirements.txt`](backend/requirements.txt) | API-only pip deps (`fastapi`, `uvicorn[standard]`) — use together with `dyops_core` install |
-| [`frontend/`](frontend/) | **Vite + React + TypeScript**, Tailwind, Recharts, shadcn-style UI primitives |
+| [`frontend/`](frontend/) | **Vite + React + TypeScript**, Tailwind v4, Recharts, shadcn-style UI primitives |
+| [`frontend/src/App.tsx`](frontend/src/App.tsx) | Main dashboard: telemetry chart, audit column, pulse/trace explainability copy, telemetry WS reconnect |
+| [`frontend/src/types/telemetry.ts`](frontend/src/types/telemetry.ts) | TS types for WebSocket payloads, chart points, **`PulseResponse`**, **`HistoryTraceBundle`** |
+| [`frontend/src/index.css`](frontend/src/index.css) | Tailwind **`@theme`** tokens (“Calm Fintech Intel” palette / chart vars) |
 
 Generated / local artifacts (typically gitignored or not committed):
 
@@ -102,6 +105,7 @@ Generated / local artifacts (typically gitignored or not committed):
 - **Joseph-form** covariance update helps keep covariances positive-semidefinite.
 - **Ring buffer** stores recent innovations for **window statistics** (mean, variance, kurtosis) and **criticality** (percentage of samples with Mahalanobis above a threshold).
 - **`update_batch`** is available for high-throughput batch ingestion (see `bench_batch.py`).
+- The **`update`** path is implemented in **Rust without GC**, which keeps **per-tick latency predictable** under continuous ingestion (see the comment above `BasisObserver::update` in [`dyops_core/src/observer.rs`](dyops_core/src/observer.rs)).
 
 ### 2. `DyopsSentinel` (`sentinel.py`)
 
@@ -133,17 +137,60 @@ Generated / local artifacts (typically gitignored or not committed):
 
 ### 6. FastAPI backend (`backend/main.py`)
 
+The app is documented in OpenAPI with an explicit product line:
+
+- **`description`**: *“High-fidelity telemetry API for monitoring digital asset basis risk and peg stability.”*
+
+**Lifecycle**
+
 - On startup: open SQLite, **replay** the last 500 events into a fresh observer (state continuity), construct **`DyopsSentinel`** (with optional **`AgenticAuditor`** if API keys present), start the Binance thread.
-- **`/ws/telemetry`**: server → client JSON messages `{"type":"telemetry","payload":{...}}` (full serialized event result plus `timestamp`, prices, `session_event_index`).
-- **`/ws/audits`**: initial chronological batch, then live tail via DB polling.
-- **REST**: `GET /api/status`, `/api/history`, `/api/pulse` — used by the React app (with Vite dev proxy).
+
+**WebSockets**
+
+- **`/ws/telemetry`**: server → client JSON `{"type":"telemetry","payload":{...}}` (event result shaped like `EventResult`, plus `timestamp`, prices, `session_event_index`).
+- **`/ws/audits`**: initial chronological batch (recent audits), then **live tail** via DB polling.
+
+**REST**
+
+- **`GET /api/status`** — configuration surface: Gemini, feed mode, paths, **`global_events_total_sqlite`**, **`mahalanobis_breach_threshold`** (matches [`MAHALANOBIS_BREACH`](dyops_core/sentinel.py) used in breach logic).
+- **`GET /api/pulse`** — **typed** pulse response (`PulseResponse`): `live`, **`last_tick_age_sec`**, `events_session`, `events_total_sqlite`, plus human **`summary`** and **`explainability`** strings (≤ ~200 / ~280 chars after clipping). Stale is inferred when **no tick for ~12s**.
+- **`GET /api/history?limit=`** — returns a **bare JSON array** of replay points (`HistoryPoint`): `t`, `measured_basis` (= ln(price ratio)), `filtered_basis`, `innovation`, `mahalanobis`, `valid`. Stable for charts and dumb consumers.
+- **`GET /api/history/trace?limit=`** — same replay as `/api/history`, wrapped as **`HistoryTraceBundle`**: top-level **`summary`** + **`explainability`** for the window, plus **`points[]`** where each row extends `HistoryPoint` with deterministic **`reasoning`** (Mahalanobis vs threshold, validity). **Gemini does not populate this.**
+
+**Explainability internals (replay)**
+
+Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pattern as `/api/history`). Per-row **`reasoning`** is computed with **`MAHALANOBIS_BREACH`** as the sentinel threshold—for example when breached and measurement is valid, copy includes Mahalanobis magnitude and **percent above threshold** (“σ” here is **product shorthand** for the normalized statistic, not an implied Gaussian claim). Invalid measurements get a withheld-measurement explanation.
 
 ### 7. React frontend (`frontend/`)
 
-- **Dark**, flat finance aesthetic; **JetBrains Mono** for numeric emphasis.
-- **Recharts** line chart (basis vs innovation) with **`isAnimationActive={false}`** and a capped buffer to reduce flicker under streaming load.
-- **Top nav**: system pulse, Gemini badge, global event count (SQLite total), feed mode.
-- **Layout**: ~70% chart, ~30% live audit log + compact table.
+**Brand & chrome**
+
+- **Calm “fintech intel”** dark UI (zinc/stone): surface tokens live in [`frontend/src/index.css`](frontend/src/index.css) (`--color-terminal`, `--color-panel`, `--color-signal-emerald`, chart slate/mahalanobis/threshold vars, etc.).
+- **JetBrains Mono** for numeric emphasis (`.font-mono-nums`).
+- **Header**: “DYOPS” + *Dyops: State-Space Intelligence Layer.* **`Methodology`** outline badge — native **`title`** tooltip: *Kalman-Filtered State Tracking vs. Static Thresholds*.
+- **System pulse** (LIVE/STALE solid dot — **no** pulse animation or neon glow); **Gemini** badge; **global events** (SQLite total); feed mode badge.
+
+**Telemetry chart (“Real-Time Telemetry”)**
+
+- **Data**: Loads **`GET /api/history`**; live updates from **`/ws/telemetry`** (buffer up to **500** points server-side on the client).
+- **Rolling draw window**: Only the trailing **`CHART_VISIBLE_POINTS`** (**120**) points are passed to **Recharts** so quiet stable feeds stay **visually readable** (scales react to recent behavior, not weeks of SQLite tail).
+- **Left Y-axis** (`basis`): **measured basis** (muted slate), **filtered state** (Signal Emerald), **innovation / residual** (stone-soft). Domain uses finite samples with optional **robust percentile** band (≥30 points → 1st–99th + padding); **tiny spans** expand to **`BASIS_MIN_DISPLAY_SPAN`** so micro-drift isn’t flattened to a hairline.
+- **Right Y-axis** (`mahal`): **Mahalanobis distance**; domain **`[0, max(breachThreshold, max_seen × 1.15)]`** with breach threshold from **`GET /api/status`**. Horizontal **criticality threshold** (`ReferenceLine`) matches sentinel breach cutoff.
+- **X-axis**: if the visible window crosses a **calendar day**, tick labels prepend a short date.
+- Charts use **`isAnimationActive={false}`** (no flashy transitions).
+
+**Explainability surfaces**
+
+- **`GET /api/pulse`**: **`summary` · `explainability`** concatenated under the telemetry card title (truncated/`line-clamp`, full text on **`title`** hover).
+- **`GET /api/history/trace`**: **`summary`** + **`explainability`** under **Structural Drift Audit** (border-accent block). Gemini audit cards unchanged below.
+
+**Resilience**
+
+- Telemetry WebSocket: on **close/error**, a **full-width banner** appears under the header: *Live Stream Paused — Reconnecting to State-Space Engine…* Reconnect uses **capped exponential backoff** (1s → 2s → … max **30s**). Audits WebSocket is unchanged (single connection).
+
+**Layout**
+
+- ~**70%** chart, ~**30%** audit column + compact **Recent audit index** table.
 
 ---
 
@@ -220,6 +267,8 @@ npm run dev
 
 Open **`http://localhost:5173`**. The Vite dev server **proxies** `/api` and `/ws` to **`http://127.0.0.1:8000`**.
 
+Smoke-check **`http://127.0.0.1:8000/docs`**: confirms the FastAPI **description**, **`PulseResponse`**, **`HistoryTraceBundle`**, and list-shaped **`HistoryPoint`** schemas match this README.
+
 ### Alternative: Streamlit only
 
 ```bash
@@ -238,17 +287,20 @@ Serve `frontend/dist` with any static host or CDN after `npm run build`, and set
 
 ---
 
-## API reference (summary)
+## API reference (detail)
 
-| Method / path | Description |
-|-----------------|-------------|
-| `GET /api/status` | Gemini configured, Binance feed mode, paths, SQLite event count |
-| `GET /api/history?limit=` | Replay Kalman state over stored events; returns `t`, `basis`, `innovation`, `valid` |
-| `GET /api/pulse` | Live vs stale feed, session tick count, SQLite total events |
-| `WebSocket /ws/telemetry` | Stream of `EventResult`-shaped JSON per processed tick |
-| `WebSocket /ws/audits` | Recent audits + live tail |
+Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are summarized below and in this README).
 
-Open **`http://127.0.0.1:8000/docs`** when the server is running for interactive OpenAPI (REST only; WebSockets are described here).
+| Method / path | Role |
+|---------------|------|
+| `GET /api/status` | `gemini_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
+| `GET /api/pulse` | **`PulseResponse`**: `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, **`summary`**, **`explainability`** |
+| `GET /api/history?limit=` | **`HistoryPoint[]`**: `t`, `measured_basis`, `filtered_basis`, `innovation`, `mahalanobis`, `valid` |
+| `GET /api/history/trace?limit=` | **`HistoryTraceBundle`**: `summary`, `explainability`, **`points`** (`HistoryTracePoint` = history fields + **`reasoning`**) |
+| `WebSocket /ws/telemetry` | Live `EventResult`-shaped payloads per tick |
+| `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
+
+**Compatibility note:** Integrations that expect a **raw array** from `/api/history` remain valid. Use **`/api/history/trace`** when you need **operator copy** or **per-tick reasoning** without touching Gemini.
 
 ---
 
@@ -257,6 +309,13 @@ Open **`http://127.0.0.1:8000/docs`** when the server is running for interactive
 - **EventResult / telemetry**: includes nested **`health`**, optional large **`snapshot`** on AUDIT-level ticks (can increase WebSocket payload size).
 - **SQLite `event_id`** on audits is **best-effort** (tied to writer state at insert time); for strict lineage, prefer timestamps and full `report_json`.
 - **Replay**: both the FastAPI app and the dashboard **replay** stored events through a new observer on startup so the filter state matches continuity of stored prices (up to the replay window).
+- **Chart vs trace**: the UI calls **`/api/history`** for the chart and **`/api/history/trace`** once on load for audit-column copy—two replays of the same window, acceptable for current scale; collapse to one request later if you add a `meta` query flag.
+
+---
+
+## Operator notes (stable feeds)
+
+On **`stable`** (e.g. USDC/USDT), log-basis moves are **very small**. The UI’s **visible window** and **Y-axis floor** exist so live ticks produce **perceptible but calm** motion. Mahalanobis often sits **near zero** on a **0…threshold** scale; the series can look **subtle** even when the pipeline is healthy—use **tooltips**, **pulse `summary`**, and **`/api/history/trace`** breach counts to validate behavior.
 
 ---
 
@@ -286,7 +345,8 @@ python bench_batch.py
 
 - After changing **Rust**, run **`maturin develop --release`** from `dyops_core/`.
 - Python modules under `dyops_core/` are imported by **`backend/main.py`** via `sys.path` insertion; keep imports resolvable from that folder.
-- Frontend: follow existing Tailwind v4 and component patterns under `frontend/src/components/ui/`.
+- Explainability copy and string caps (`_PULSE_*_MAX`, `_HISTORY_*_MAX`) live near the top of [`backend/main.py`](backend/main.py); keep **`MAHALANOBIS_BREACH`** imported from **`sentinel`**, don’t drift literals.
+- Frontend: Tailwind v4 and shadcn-style primitives under [`frontend/src/components/ui/`](frontend/src/components/ui/); chart **`CHART_VISIBLE_POINTS`**, **`BASIS_MIN_DISPLAY_SPAN`**, etc. live in **`App.tsx`**—tune there for quieter vs noisier feeds.
 
 ---
 

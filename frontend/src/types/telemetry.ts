@@ -18,8 +18,37 @@ export interface TelemetryPayload {
 
 export interface ChartPoint {
   t: number
-  basis: number
+  measured_basis: number
+  filtered_basis: number
   innovation: number
+  mahalanobis: number
+}
+
+/** GET /api/pulse */
+export interface PulseResponse {
+  live: boolean
+  last_tick_age_sec: number | null
+  events_session: number
+  events_total_sqlite: number
+  summary?: string
+  explainability?: string
+}
+
+/** GET /api/history/trace */
+export interface HistoryTraceBundle {
+  summary: string
+  explainability: string
+  points: HistoryTracePoint[]
+}
+
+export interface HistoryTracePoint {
+  t: number
+  measured_basis: number
+  filtered_basis: number
+  innovation: number
+  mahalanobis: number
+  valid: boolean
+  reasoning: string
 }
 
 export interface AuditRow {

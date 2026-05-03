@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import queue
 import sys
@@ -34,6 +35,154 @@ from sentinel import (  # noqa: E402
     EventResult,
     MAHALANOBIS_BREACH,
 )
+
+_HISTORY_SUMMARY_MAX = 200
+_HISTORY_EXPLAIN_MAX = 280
+_PULSE_SUMMARY_MAX = 200
+_PULSE_EXPLAIN_MAX = 280
+
+
+def _clip_text(s: str, max_len: int) -> str:
+    t = s.strip()
+    if len(t) <= max_len:
+        return t
+    return t[: max_len - 1].rstrip() + "…"
+
+
+def _reasoning_row(
+    measurement_valid: bool,
+    mahalanobis_distance: float,
+    breach_threshold: float,
+) -> str:
+    """Deterministic copy for replay rows; never LLM / Gemini."""
+    if not measurement_valid:
+        return (
+            "Measurement withheld: invalid or non-positive prices; observer did not "
+            "apply this tick. Deterministic statistical reasoning defers the update."
+        )
+    m = mahalanobis_distance
+    if not math.isfinite(m):
+        return "Mahalanobis distance undefined for this step; no breach assessment applied."
+    if m > breach_threshold:
+        pct_above = (m - breach_threshold) / breach_threshold * 100.0
+        return (
+            f"Mahalanobis distance at {m:.2f}σ ({pct_above:.0f}% above sentinel threshold). "
+            "Correlation fracture detected."
+        )
+    if m == 0.0:
+        return (
+            "Deterministic statistical reasoning: innovation within model band for this step "
+            f"(Mahalanobis {m:.2f}; threshold {breach_threshold:.2f})."
+        )
+    return (
+        "Deterministic statistical reasoning: Mahalanobis distance within sentinel norm; "
+        f"current {m:.4f} at or below threshold {breach_threshold:.2f}."
+    )
+
+
+def _replay_history_events(
+    rows: list[dict[str, Any]],
+) -> tuple[list["HistoryPoint"], list["HistoryTracePoint"]]:
+    observer = dyops_core.BasisObserver(
+        name="dyops-api-replay",
+        theta=1.0,
+        ring_buffer_capacity=1000,
+    )
+    plain_out: list[HistoryPoint] = []
+    trace_out: list[HistoryTracePoint] = []
+    thresh = float(MAHALANOBIS_BREACH)
+    for row in rows:
+        ts = float(row["timestamp"])
+        phys = float(row["physical_price"])
+        tok = float(row["token_price"])
+        measured = (
+            math.log(phys / tok)
+            if phys > 0.0 and tok > 0.0 and math.isfinite(phys) and math.isfinite(tok)
+            else float("nan")
+        )
+        h = observer.update(ts, phys, tok)
+        reasoning = _reasoning_row(
+            h.measurement_valid,
+            h.mahalanobis_distance,
+            thresh,
+        )
+        hp = HistoryPoint(
+            t=ts,
+            measured_basis=float(measured),
+            filtered_basis=h.filtered_basis,
+            innovation=h.innovation,
+            mahalanobis=h.mahalanobis_distance,
+            valid=h.measurement_valid,
+        )
+        plain_out.append(hp)
+        trace_out.append(
+            HistoryTracePoint(**hp.model_dump(), reasoning=reasoning),
+        )
+    return plain_out, trace_out
+
+
+def _trace_window_copy(points: list["HistoryTracePoint"]) -> tuple[str, str]:
+    if not points:
+        summary = "Replay trace: empty window."
+        explain = (
+            "Load persisted ticks to reproduce the observer path with row-level "
+            "deterministic reasoning (Mahalanobis vs sentinel threshold; no LLM)."
+        )
+        return _clip_text(summary, _HISTORY_SUMMARY_MAX), _clip_text(
+            explain, _HISTORY_EXPLAIN_MAX
+        )
+    n = len(points)
+    breaches = sum(
+        1
+        for p in points
+        if p.valid and p.mahalanobis > float(MAHALANOBIS_BREACH)
+    )
+    summary = (
+        f"Replay trace: {n} ticks; {breaches} breach moments "
+        f"(valid measurement, Mahalanobis > {MAHALANOBIS_BREACH})."
+    )
+    explain = (
+        "SQLite replay reproduces the Kalman observer; each point includes statistical "
+        "reasoning from Mahalanobis distance and measurement validity. Gemini is not used here."
+    )
+    return _clip_text(summary, _HISTORY_SUMMARY_MAX), _clip_text(
+        explain, _HISTORY_EXPLAIN_MAX
+    )
+
+
+def _pulse_narrative(
+    *,
+    live: bool,
+    age_sec: float | None,
+    session: int,
+    total: int,
+) -> tuple[str, str]:
+    age_s = (
+        f"{age_sec:.1f}s"
+        if age_sec is not None and math.isfinite(age_sec)
+        else "n/a"
+    )
+    if live:
+        summary = (
+            f"LIVE · last tick {age_s} ago · session {session} events · "
+            f"{total} persisted in SQLite."
+        )
+        explain = (
+            "Feed is current; streamed Mahalanobis and innovation reflect live "
+            "deterministic observer updates for operational monitoring."
+        )
+    else:
+        summary = (
+            f"STALE · last tick age {age_s} (cutoff 12s) · session {session} · "
+            f"{total} events on record."
+        )
+        explain = (
+            "Inbound data may be interrupted; filter state will not advance until the "
+            "feed resumes—treat live indicators as potentially stale."
+        )
+    return _clip_text(summary, _PULSE_SUMMARY_MAX), _clip_text(
+        explain, _PULSE_EXPLAIN_MAX
+    )
 
 
 def _event_result_model(er: EventResult) -> dict[str, Any]:
@@ -233,6 +382,9 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Dyops API",
     version="1.0.0",
+    description=(
+        "High-fidelity telemetry API for monitoring digital asset basis risk and peg stability."
+    ),
     lifespan=lifespan,
 )
 
@@ -255,6 +407,7 @@ class StatusResponse(BaseModel):
     audits_dir: str
     db_path: str
     global_events_total_sqlite: int
+    mahalanobis_breach_threshold: float
 
 
 @app.get("/api/status", response_model=StatusResponse)
@@ -267,58 +420,90 @@ async def api_status() -> StatusResponse:
         audits_dir=str(AUDITS_DIR.resolve()),
         db_path=str(_persistence.db_path.resolve()),
         global_events_total_sqlite=_persistence.count_events(),
+        mahalanobis_breach_threshold=float(MAHALANOBIS_BREACH),
     )
 
 
 class HistoryPoint(BaseModel):
     t: float
-    basis: float
+    measured_basis: float
+    filtered_basis: float
     innovation: float
+    mahalanobis: float
     valid: bool
+
+
+class HistoryTracePoint(HistoryPoint):
+    """Replay row plus deterministic statistical reasoning (no Gemini)."""
+
+    reasoning: str
+
+
+class HistoryTraceBundle(BaseModel):
+    """Audit-trail wrapper; default GET /api/history stays a bare array for the chart."""
+
+    summary: str
+    explainability: str
+    points: list[HistoryTracePoint]
+
+
+class PulseResponse(BaseModel):
+    """Real-time pulse state with short explainability strings for operators."""
+
+    live: bool
+    last_tick_age_sec: float | None
+    events_session: int
+    events_total_sqlite: int
+    summary: str = ""
+    explainability: str = ""
 
 
 @app.get("/api/history", response_model=list[HistoryPoint])
 async def api_history(limit: int = 500) -> list[HistoryPoint]:
     assert _persistence is not None
     rows = _persistence.load_recent_events(min(limit, 2000))
-    observer = dyops_core.BasisObserver(
-        name="dyops-api-replay",
-        theta=1.0,
-        ring_buffer_capacity=1000,
+    plain, _ = _replay_history_events(rows)
+    return plain
+
+
+@app.get("/api/history/trace", response_model=HistoryTraceBundle)
+async def api_history_trace(limit: int = 500) -> HistoryTraceBundle:
+    """Replay with per-tick reasoning; chart clients may keep using GET /api/history only."""
+    assert _persistence is not None
+    rows = _persistence.load_recent_events(min(limit, 2000))
+    _, trace = _replay_history_events(rows)
+    summary, explainability = _trace_window_copy(trace)
+    return HistoryTraceBundle(
+        summary=summary,
+        explainability=explainability,
+        points=trace,
     )
-    out: list[HistoryPoint] = []
-    for row in rows:
-        h = observer.update(
-            float(row["timestamp"]),
-            float(row["physical_price"]),
-            float(row["token_price"]),
-        )
-        out.append(
-            HistoryPoint(
-                t=float(row["timestamp"]),
-                basis=h.filtered_basis,
-                innovation=h.innovation,
-                valid=h.measurement_valid,
-            )
-        )
-    return out
 
 
-@app.get("/api/pulse")
-async def api_pulse() -> dict[str, Any]:
+@app.get("/api/pulse", response_model=PulseResponse)
+async def api_pulse() -> PulseResponse:
     """Server-side pulse: time since last ingested tick."""
     stale = True
     if _last_tick_monotonic > 0:
         stale = (time.monotonic() - _last_tick_monotonic) > 12.0
     total_sqlite = _persistence.count_events() if _persistence is not None else 0
-    return {
-        "live": not stale,
-        "last_tick_age_sec": time.monotonic() - _last_tick_monotonic
-        if _last_tick_monotonic > 0
-        else None,
-        "events_session": _session_event_count,
-        "events_total_sqlite": total_sqlite,
-    }
+    age = (
+        time.monotonic() - _last_tick_monotonic if _last_tick_monotonic > 0 else None
+    )
+    summary, explainability = _pulse_narrative(
+        live=not stale,
+        age_sec=age,
+        session=_session_event_count,
+        total=total_sqlite,
+    )
+    return PulseResponse(
+        live=not stale,
+        last_tick_age_sec=age,
+        events_session=_session_event_count,
+        events_total_sqlite=total_sqlite,
+        summary=summary,
+        explainability=explainability,
+    )
 
 
 @app.websocket("/ws/telemetry")

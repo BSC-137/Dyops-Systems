@@ -208,6 +208,9 @@ impl BasisObserver {
     }
 
     /// One Kalman step. Invalid prices yield `measurement_valid: false` and do not mutate the filter.
+    ///
+    /// Implemented in Rust so this hot path avoids GC pauses: per-tick cost stays predictable under
+    /// continuous ingestion, which stabilizes latency for timely state during volatile basis moves.
     pub fn update(&mut self, timestamp: f64, physical_price: f64, token_price: f64) -> SystemHealth {
         let h = self.compute_update(timestamp, physical_price, token_price);
         self.push_ring(timestamp, &h);
