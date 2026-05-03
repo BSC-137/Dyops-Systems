@@ -1,25 +1,118 @@
 # Dyops Systems
 
-Dyops is a **B2B-style tokenized-asset basis monitoring** stack: ingest paired prices, run a **Rust + PyO3 Kalman-style observer**, apply Python **sentinel** policies (Mahalanobis breach + rolling criticality), optionally escalate to **Gemini** audits, persist to **SQLite**, and expose everything through **FastAPI** (REST + WebSockets) and a **React + Vite** operator UI. **Deterministic replay explainability** (per-tick `reasoning`, pulse copy) is surfaced on the API for demos and integrations **without relying on Gemini**. A legacy **Streamlit** dashboard remains in [`dyops_core/dashboard.py`](dyops_core/dashboard.py).
+## Product brief — for founders, BD, and technical partners
 
-This document is the **top-level guide** to layout, architecture, configuration, explainability endpoints, UX behavior, and how to run everything. Rust/build notes scoped to the Python package live in [`dyops_core/README.md`](dyops_core/README.md).
+Dyops gives product and risk teams a **focused way to watch tokenized-asset basis and peg stability**: streamed prices, a **Rust-backed state-space filter**, explicit **Mahalanobis-style surprise** against that model, persistence for forensics, and **API-native explainability** operators can read without standing up a quant stack.
 
----
+Partners typically embed monitoring **behind their own UX** (treasury, neo-bank ops, tokenized-asset products) and use Dyops as the **measurement and early-warning layer**.
 
-## What problem it solves
+> **An embeddable intelligence layer to monitor peg drift and basis risk without building your own quant-infra stack.**
 
-Tokenized assets (LSTs, stablecoin pairs, wrapped tokens) can drift from their reference **basis** (log-ratio of economically linked prices). Dyops:
+**What “embeddable” means today:** production-style integration is via **`REST` (`/api/*`)** and **`WebSockets` (`/ws/*`)**, with an optional **React + Vite reference UI** (`frontend/`) for demos and internal ops. **Hosted multi-tenant SaaS, fine-grained API keys, and language-specific SDKs are not first-class in this repo yet** — see **[Next 90 days (planned)](#next-90-days-planned)**.
 
-1. **Ingests** paired prices (physical vs token, or stable vs peg) as a time series.
-2. **Filters** the basis with a **state-space observer** (Kalman update with diagnostics).
-3. **Flags** statistically unusual **innovations** (Mahalanobis-style distance vs the model).
-4. **Escalates** to **AUDIT** when rolling **criticality** (fraction of recent samples in breach) crosses a threshold, optionally calling **Gemini** for a structured JSON risk report.
-5. **Persists** each processed tick and each audit to **SQLite** for replay, compliance, and post-mortems.
-6. **Streams** live results to browsers over **WebSockets** (FastAPI stack) or renders them in **Streamlit**.
+Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/README.md).
 
 ---
 
-## High-level architecture
+## What Dyops does
+
+- **Ingests** paired market prices over **Binance WebSockets** (configurable **`stable`** vs LST-style feeds via `DYOPS_BINANCE_FEED`).
+- **Filters** log-basis with a **`BasisObserver`** implemented in **Rust** (PyO3), exposed to Python — Kalman-style updates with **`filtered_basis`**, **`innovation`**, **`mahalanobis_distance`**, **`measurement_valid`**.
+- **Policies** (`DyopsSentinel`): breach when Mahalanobis exceeds **`MAHALANOBIS_BREACH`** (default `3.0`); **AUDIT** when rolling **criticality** over a finite window crosses a configurable threshold.
+- **Persists** ticks and audits to **SQLite** through a background writer (**`PersistenceManager`**).
+- **Streams** live telemetry and audit tails over **`/ws/telemetry`** and **`/ws/audits`**; **replay** aligns observer state from stored events on startup.
+- **Explainability:** **`GET /api/pulse`** exposes short **`summary`** / **`explainability`** strings; **`GET /api/history/trace`** returns window copy plus deterministic per-tick **`reasoning`** (no LLM — **Gemini does not populate this**).
+- **Optional narrative audits:** **`AgenticAuditor`** (Gemini) when API keys are set — structured JSON (+ SQLite rows), surfaced in the React **Structural Drift Audit** column when configured.
+
+**Boundary (read this once):** Dyops is **not** a regulated attestation service, SOC2-certified control, or substitute for legal/compliance sign-off. Deterministic **`reasoning`** on replay is **operational evidence-grade trace** (what the model saw and how it was classified) — **not** “regulatory proof” or legal advice.
+
+---
+
+## 5-Minute Partner Evaluation
+
+Cold start → confirm value in three acts. **Ports:** API **8000**, Vite **5173** (proxies `/api` and `/ws` to the API).
+
+### Cold start (copy-paste)
+
+**One-time:** Rust + Python 3.10+ + Node 20+; from `dyops_core/`:
+
+```bash
+cd dyops_core
+python -m venv .venv
+source .venv/bin/activate   # Windows: .venv\Scripts\activate
+pip install -U pip maturin
+pip install -e .
+maturin develop --release
+```
+
+From **repo root** (same venv):
+
+```bash
+pip install -r backend/requirements.txt
+```
+
+From **`frontend/`**:
+
+```bash
+npm install
+```
+
+**Two terminals — API then UI:**
+
+```bash
+# Terminal A (repo root, venv on)
+uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
+```
+
+```bash
+# Terminal B
+cd frontend && npm run dev
+```
+
+Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for OpenAPI (`PulseResponse`, `HistoryTraceBundle`, `HistoryPoint[]`).
+
+---
+
+### Act I — The Pulse (filtered state)
+
+- **UI:** Header **System pulse** shows **LIVE** vs **STALE** (solid dot; stale ≈ **no tick for ~12s**). **Global events** reflects SQLite event count.
+- **UI:** Card **Real-Time Telemetry** — under the title, copy from **`GET /api/pulse`** fields **`summary`** · **`explainability`** (hover for full text).
+- **UI:** Chart — **Filtered state** (emerald), **Measured basis** (slate), **Innovation (residual)** (stone) — live points from **`/ws/telemetry`** after history loads from **`GET /api/history`**.
+- **API:** `GET http://127.0.0.1:8000/api/pulse` — `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, `summary`, `explainability`.
+
+---
+
+### Act II — The Drift (anomaly / statistical surprise)
+
+- **UI:** Same chart — right axis **Mahalanobis distance**; dashed **Criticality threshold** matches **`mahalanobis_breach_threshold`** from **`GET /api/status`** (aligned with **`MAHALANOBIS_BREACH`** in [`dyops_core/sentinel.py`](dyops_core/sentinel.py)).
+- **UI:** **Structural Drift Audit** — top block: window **`summary`** and **`explainability`** from **`GET /api/history/trace`** (breach counts in natural language).
+- **API:** `GET http://127.0.0.1:8000/api/history/trace?limit=500` — each point includes deterministic **`reasoning`** (Mahalanobis vs threshold, validity). **Not** Gemini-generated.
+
+---
+
+### Act III — The Audit trail (escalation & narrative)
+
+- **UI:** **Structural Drift Audit** — scroll list + **Recent audit index** table; data from **`WebSocket /ws/audits`** (initial snapshot + live tail). **Gemini** badge **CONFIGURED** vs **OFFLINE** comes from **`GET /api/status`** (`gemini_configured`).
+- **When Gemini is OFFLINE:** expect *“No Gemini audits yet.”* — escalation path and **`/api/history/trace`** reasoning still demonstrate **deterministic** monitoring; optional LLM is additive.
+- **When configured:** audit cards show risk and narrative fields from stored reports (JSON + SQLite).
+
+---
+
+## Wedge: why teams reach for an API-native layer
+
+| Dimension | Traditional / manual risk reporting | Dyops intelligence layer |
+|-----------|-------------------------------------|---------------------------|
+| **Cadence** | Batch reports, periodic reviews | **Streaming** ticks; pulse and telemetry update continuously |
+| **Threshold logic** | Often static rules on raw prices | **State-space filter** + **Mahalanobis-style** surprise vs the model |
+| **Integration** | Spreadsheets, decks, ad-hoc exports | **`REST` + `WebSockets`** first; embed in your services and SOCs |
+| **Forensics** | Reconstructing “what we knew when” is manual | **SQLite replay** + **`/api/history/trace`** with per-tick **`reasoning`** |
+| **Narration** | Human-written post-mortems | Optional **Gemini** audit JSON for structured narrative (when keys present) |
+
+---
+
+## Technical reference
+
+### High-level architecture
 
 ```mermaid
 flowchart LR
@@ -74,7 +167,13 @@ flowchart LR
 
 ---
 
-## Repository layout
+### What problem it solves
+
+Tokenized assets (LSTs, stablecoin pairs, wrapped tokens) can drift from their reference **basis** (log-ratio of economically linked prices). Dyops concentrates on **continuous monitoring**, **structured surprise**, and **durable replay** so operators can react and reconstruct state without rebuilding quant infrastructure.
+
+---
+
+### Repository layout
 
 | Path | Role |
 |------|------|
@@ -96,9 +195,9 @@ Generated / local artifacts (typically gitignored or not committed):
 
 ---
 
-## Core components (detail)
+### Core components (detail)
 
-### 1. Rust `BasisObserver` (`dyops_core` Python package)
+#### 1. Rust `BasisObserver` (`dyops_core` Python package)
 
 - **State** tracks basis, velocity, and mean level in a **critically damped OU**-style discrete model with mean-reversion speed **`theta`**.
 - **`update(timestamp, physical_price, token_price)`** returns **`SystemHealth`**: `filtered_basis`, `innovation`, `mahalanobis_distance`, `measurement_valid`.
@@ -107,7 +206,7 @@ Generated / local artifacts (typically gitignored or not committed):
 - **`update_batch`** is available for high-throughput batch ingestion (see `bench_batch.py`).
 - The **`update`** path is implemented in **Rust without GC**, which keeps **per-tick latency predictable** under continuous ingestion (see the comment above `BasisObserver::update` in [`dyops_core/src/observer.rs`](dyops_core/src/observer.rs)).
 
-### 2. `DyopsSentinel` (`sentinel.py`)
+#### 2. `DyopsSentinel` (`sentinel.py`)
 
 - Wraps **`BasisObserver`** with policy:
   - **BREACH** when measurement is valid and **Mahalanobis distance** exceeds **`MAHALANOBIS_BREACH`** (default `3.0`).
@@ -115,7 +214,7 @@ Generated / local artifacts (typically gitignored or not committed):
 - **`process_event`** returns **`EventResult`**: `level` (`MONITORING` / `BREACH` / `AUDIT`), `health`, optional **`snapshot`** dict for the auditor, `criticality_recent_pct`.
 - **`AgenticAuditor`** (optional): uses **`google-genai`**, default model from **`DYOPS_GEMINI_MODEL`** (`gemini-3-flash`). When an audit runs, results are saved as JSON files and, if **`PersistenceManager`** is wired, **`schedule_audit`** stores the full report in SQLite.
 
-### 3. `PersistenceManager` (`database.py`)
+#### 3. `PersistenceManager` (`database.py`)
 
 - All writes go through a **single background thread** and a **queue**, so ingestion never blocks the telemetry loop.
 - **Tables**
@@ -123,19 +222,19 @@ Generated / local artifacts (typically gitignored or not committed):
   - **`audits`**: `timestamp`, `event_id` (best-effort link to last event id at write time), `report_json` (full JSON including snapshot + Gemini payload when applicable)
 - Helpers: **`load_recent_events`**, **`load_recent_audits`**, **`load_audits_after`**, **`count_events`**, **`get_max_audit_id`**.
 
-### 4. `binance_feed.py`
+#### 4. `binance_feed.py`
 
 - **Stable basis (default):** `usdcusdt@trade` → `physical_price = 1.0`, `token_price` = USDC price in USDT.
 - **LST mode:** combined `ethusdt@trade` + `stethusdt@trade` → `(eth_usdt, steth_usdt)`.
 - **Reconnect**: exponential backoff with cap (circuit-breaker style).
 - Mode: environment **`DYOPS_BINANCE_FEED`** (`stable` vs `lst` / `steth` / etc.; see code for aliases).
 
-### 5. Streamlit dashboard (`dashboard.py`)
+#### 5. Streamlit dashboard (`dashboard.py`)
 
 - Optional **glass-style** UI: Plotly chart, metrics, sidebar audit cards, **JetBrains Mono** styling.
 - Uses the same **Binance feed**, **sentinel**, and **persistence** patterns as the API (in-process). Suitable for quick demos without the React stack.
 
-### 6. FastAPI backend (`backend/main.py`)
+#### 6. FastAPI backend (`backend/main.py`)
 
 The app is documented in OpenAPI with an explicit product line:
 
@@ -161,7 +260,7 @@ The app is documented in OpenAPI with an explicit product line:
 
 Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pattern as `/api/history`). Per-row **`reasoning`** is computed with **`MAHALANOBIS_BREACH`** as the sentinel threshold—for example when breached and measurement is valid, copy includes Mahalanobis magnitude and **percent above threshold** (“σ” here is **product shorthand** for the normalized statistic, not an implied Gaussian claim). Invalid measurements get a withheld-measurement explanation.
 
-### 7. React frontend (`frontend/`)
+#### 7. React frontend (`frontend/`)
 
 **Brand & chrome**
 
@@ -194,7 +293,7 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 ---
 
-## Environment variables
+### Environment variables
 
 | Variable | Purpose |
 |----------|---------|
@@ -206,7 +305,7 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 ---
 
-## Prerequisites
+### Prerequisites
 
 - **Rust** (stable) and **Cargo** (for `maturin`)
 - **Python** 3.10+
@@ -214,9 +313,9 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 ---
 
-## Installation and build
+### Installation and build
 
-### 1. Python environment and native extension
+#### 1. Python environment and native extension
 
 From **`dyops_core/`**:
 
@@ -231,7 +330,7 @@ maturin develop --release    # builds and links the Rust dyops_core extension
 
 `pip install -e .` pulls `numpy`, `loguru`, `google-genai`, `streamlit`, `plotly`, `websockets` per [`pyproject.toml`](dyops_core/pyproject.toml).
 
-### 2. API server dependencies
+#### 2. API server dependencies
 
 From the **repository root** (same venv as above):
 
@@ -239,7 +338,7 @@ From the **repository root** (same venv as above):
 pip install -r backend/requirements.txt
 ```
 
-### 3. Frontend dependencies
+#### 3. Frontend dependencies
 
 ```bash
 cd frontend
@@ -248,9 +347,9 @@ npm install
 
 ---
 
-## How to run
+### How to run
 
-### Recommended: FastAPI + React
+#### Recommended: FastAPI + React
 
 **Terminal A** — API (from repo root, venv activated):
 
@@ -267,9 +366,9 @@ npm run dev
 
 Open **`http://localhost:5173`**. The Vite dev server **proxies** `/api` and `/ws` to **`http://127.0.0.1:8000`**.
 
-Smoke-check **`http://127.0.0.1:8000/docs`**: confirms the FastAPI **description**, **`PulseResponse`**, **`HistoryTraceBundle`**, and list-shaped **`HistoryPoint`** schemas match this README.
+Smoke-check **`http://127.0.0.1:8000/docs`**: confirms the FastAPI **description**, **`PulseResponse`**, **`HistoryTraceBundle`**, and list-shaped **`HistoryPoint`** schemas.
 
-### Alternative: Streamlit only
+#### Alternative: Streamlit only
 
 ```bash
 cd dyops_core
@@ -277,7 +376,7 @@ source .venv/bin/activate
 streamlit run dashboard.py
 ```
 
-### Production-style API (no reload)
+#### Production-style API (no reload)
 
 ```bash
 uvicorn backend.main:app --host 0.0.0.0 --port 8000
@@ -287,7 +386,7 @@ Serve `frontend/dist` with any static host or CDN after `npm run build`, and set
 
 ---
 
-## API reference (detail)
+### API reference (detail)
 
 Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are summarized below and in this README).
 
@@ -304,7 +403,7 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 ---
 
-## Data model notes
+### Data model notes
 
 - **EventResult / telemetry**: includes nested **`health`**, optional large **`snapshot`** on AUDIT-level ticks (can increase WebSocket payload size).
 - **SQLite `event_id`** on audits is **best-effort** (tied to writer state at insert time); for strict lineage, prefer timestamps and full `report_json`.
@@ -313,22 +412,23 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 ---
 
-## Operator notes (stable feeds)
+### Operator notes (stable feeds)
 
 On **`stable`** (e.g. USDC/USDT), log-basis moves are **very small**. The UI’s **visible window** and **Y-axis floor** exist so live ticks produce **perceptible but calm** motion. Mahalanobis often sits **near zero** on a **0…threshold** scale; the series can look **subtle** even when the pipeline is healthy—use **tooltips**, **pulse `summary`**, and **`/api/history/trace`** breach counts to validate behavior.
 
 ---
 
-## Security and compliance
+### Security and compliance
 
 - **Never commit** API keys, `.env` files with secrets, or `audits/*.json` if they contain sensitive institutional data. Use `.gitignore` appropriately.
 - **Binance** public market data only; you are responsible for network policies, IP allowlists, and terms of use.
 - **Gemini** calls send **snapshots** derived from internal telemetry; review data handling against your policies.
 - **Export / compliance** features mentioned in Streamlit are **placeholders** until a formal signed-report pipeline exists.
+- This README **does not** claim SOC 2, ISO, or regulatory approvals for Dyops as software.
 
 ---
 
-## Testing and benchmarks
+### Testing and benchmarks
 
 ```bash
 cd dyops_core
@@ -341,12 +441,22 @@ python bench_batch.py
 
 ---
 
-## Contributing (brief)
+### Contributing (brief)
 
 - After changing **Rust**, run **`maturin develop --release`** from `dyops_core/`.
 - Python modules under `dyops_core/` are imported by **`backend/main.py`** via `sys.path` insertion; keep imports resolvable from that folder.
 - Explainability copy and string caps (`_PULSE_*_MAX`, `_HISTORY_*_MAX`) live near the top of [`backend/main.py`](backend/main.py); keep **`MAHALANOBIS_BREACH`** imported from **`sentinel`**, don’t drift literals.
 - Frontend: Tailwind v4 and shadcn-style primitives under [`frontend/src/components/ui/`](frontend/src/components/ui/); chart **`CHART_VISIBLE_POINTS`**, **`BASIS_MIN_DISPLAY_SPAN`**, etc. live in **`App.tsx`**—tune there for quieter vs noisier feeds.
+
+---
+
+## Next 90 days (planned)
+
+Everything below is **roadmap**, not shipped in-repo unless separately noted:
+
+- **Multi-tenant auth / per-tenant API keys** — partition access and metering for partner deployments.
+- **Outbound webhooks** — Slack / PagerDuty-style notifications on breach or audit escalation (payload mirroring sentinel events).
+- **Hosted vs BYO** — clarify packaging: customer VPC / single-tenant SaaS versus self-hosted bundle (Docker Compose / Helm TBD).
 
 ---
 
