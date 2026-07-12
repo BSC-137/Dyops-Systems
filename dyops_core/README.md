@@ -13,7 +13,7 @@ Dyops is a **tokenized-asset basis monitoring** stack: a Rust + PyO3 **Kalman ob
 | `dyops_core/sentinel.py` | `DyopsSentinel`, `AgenticAuditor` (Google **Gen AI** unified SDK) |
 | `dyops_core/dashboard.py` | Streamlit **Basis Guard** UI (Binance WebSocket + persistence) |
 | `dyops_core/bench_batch.py` | Batch vs loop benchmark |
-| `dyops_core/scenario_test.py` | Matplotlib scenario harness |
+| `dyops_core/scenarios/` | Headless sentinel scenario catalog, runner, and CLI |
 | `dyops_core/database.py` | SQLite `PersistenceManager` (events + audits) |
 | `dyops_core/binance_feed.py` | Binance Spot WebSocket feed (stable / LST) |
 | `dyops_core/audits/` | JSON audit records (artifacts ignored by git; folder tracked) |
@@ -73,7 +73,10 @@ streamlit run dashboard.py
 
 ```bash
 cargo test                 # Rust unit tests
+python -m unittest discover -s tests -v
 python bench_batch.py      # After maturin develop
+python -m scenarios.run --list
+python -m scenarios.run --scenario slow_drift --json
 ```
 
 ## Configuration
