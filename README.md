@@ -11,6 +11,8 @@ Partners typically embed monitoring **behind their own UX** (treasury, neo-bank 
 **What “embeddable” means today:** production-style integration is via **`REST` (`/api/*`)** and **`WebSockets` (`/ws/*`)**, with an optional **React + Vite reference UI** (`frontend/`) for demos and internal ops. **Hosted multi-tenant SaaS, fine-grained API keys, and language-specific SDKs are not first-class in this repo yet** — see **[Next 90 days (planned)](#next-90-days-planned)**.
 
 Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/README.md).
+The measurement, escalation, and validation boundaries are documented in
+[`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 
 ---
 
@@ -444,6 +446,19 @@ python -m scenarios.run --all --json  # Threshold-gated; exits 1 on failure
 The headless scenario framework runs deterministic market and feed stresses through
 the full `DyopsSentinel.process_event` policy path, checks replay and scenario
 thresholds, and can emit strict JSON results.
+
+Run validation:
+
+```bash
+cd dyops_core && python -m scenarios.run --all
+```
+
+Generate the partner-facing robustness evidence from the repository root with the
+virtual environment active:
+
+```bash
+python scripts/generate_robustness_report.py
+```
 
 ---
 
