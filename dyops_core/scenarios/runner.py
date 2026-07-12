@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import math
 import statistics
+import time
 from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
@@ -12,6 +13,7 @@ import dyops_core
 from sentinel import DyopsSentinel, SentinelLevel
 
 from .base import Scenario
+from .metrics import compute_extended_metrics, evaluate_thresholds
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,9 @@ class ScenarioResult:
     observer_parameters: dict[str, Any]
     ticks: list[TickResult]
     metrics: ScenarioMetrics
+    passed: bool
+    failures: list[str]
+    extended_metrics: dict[str, Any]
 
     def to_dict(self) -> dict[str, Any]:
         """Return a mapping accepted by strict JSON encoders."""
@@ -162,6 +167,8 @@ def run_scenario(
     )
     sentinel = sentinel_factory(observer)
     ticks: list[TickResult] = []
+    first_audit_snapshot_size_bytes: int | None = None
+    started = time.perf_counter()
 
     for tick, (timestamp, physical, token) in enumerate(
         zip(scenario.timestamps, scenario.physical_price, scenario.token_price)
@@ -172,6 +179,14 @@ def run_scenario(
             token,
             schedule_background_audit=False,
         )
+        if first_audit_snapshot_size_bytes is None and event.snapshot is not None:
+            first_audit_snapshot_size_bytes = len(
+                json.dumps(
+                    _json_safe(event.snapshot),
+                    allow_nan=False,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            )
         ticks.append(
             TickResult(
                 tick=tick,
@@ -188,6 +203,25 @@ def run_scenario(
             )
         )
 
+    processing_elapsed_ms = (time.perf_counter() - started) * 1000.0
+    basic_metrics = _compute_metrics(ticks)
+    replay_threshold = float(
+        scenario.expected_outcomes.get("thresholds", {}).get(
+            "replay_max_abs_error",
+            1e-12,
+        )
+    )
+    extended_metrics = compute_extended_metrics(
+        scenario,
+        ticks,
+        observer_factory=observer_factory,
+        processing_elapsed_ms=processing_elapsed_ms,
+        first_audit_snapshot_size_bytes=first_audit_snapshot_size_bytes,
+        return_to_monitoring_tick=basic_metrics.return_to_monitoring_tick,
+        replay_max_abs_error_threshold=replay_threshold,
+    )
+    failures = evaluate_thresholds(scenario, extended_metrics, ticks)
+
     return ScenarioResult(
         scenario=scenario.name,
         description=scenario.description,
@@ -201,5 +235,8 @@ def run_scenario(
             "audit_criticality_pct": sentinel.audit_criticality_pct,
         },
         ticks=ticks,
-        metrics=_compute_metrics(ticks),
+        metrics=basic_metrics,
+        passed=not failures,
+        failures=failures,
+        extended_metrics=extended_metrics,
     )

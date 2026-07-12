@@ -46,6 +46,10 @@ def stable_tracking(seed: int = 7) -> Scenario:
             "stress_type": "baseline",
             "expected_terminal_level": "MONITORING",
             "expected_audit": False,
+            "thresholds": {
+                "max_breaches": 0,
+                "replay_max_abs_error": 1e-12,
+            },
         },
     )
 
@@ -67,8 +71,11 @@ def slow_drift(seed: int = 11) -> Scenario:
             "stress_type": "fundamental",
             "drift_bps": 50,
             "drift_ticks": drift_ticks,
+            "drift_start_tick": WARMUP_TICKS,
             "expected_terminal_level": "MONITORING",
             "expected_escalation": False,
+            # TODO: Option B: require breach if product wants slow-drift alarms.
+            "thresholds": {"max_breaches": 0},
         },
     )
 
@@ -90,6 +97,11 @@ def sudden_depeg(seed: int = 13) -> Scenario:
             "shock_tick": shock_tick,
             "shock_pct": -2.0,
             "expected_escalation": True,
+            "max_allowed_latency_ticks": 5,
+            "thresholds": {
+                "min_breaches": 1,
+                "max_time_to_first_breach_ticks": 5,
+            },
         },
     )
 
@@ -114,6 +126,7 @@ def gradual_then_break(seed: int = 17) -> Scenario:
             "drift_start_tick": drift_start,
             "break_tick": break_tick,
             "expected_escalation": True,
+            "thresholds": {"min_breaches": 1},
         },
     )
 
@@ -142,7 +155,9 @@ def oracle_lag(seed: int = 19) -> Scenario:
         expected_outcomes={
             "stress_type": "operational",
             "lag_ticks": lag_ticks,
+            "anomaly_window": [lag_ticks, n - 1],
             "expected_transient_breaches": True,
+            "thresholds": {},  # Document-only until operational policy is defined.
         },
     )
 
@@ -166,6 +181,10 @@ def stale_feed(seed: int = 23) -> Scenario:
             "stress_type": "operational",
             "invalid_ticks": invalid_ticks,
             "expected_invalid_measurements": len(invalid_ticks),
+            "thresholds": {
+                "expected_invalid_measurements": len(invalid_ticks),
+                "max_escalations_on_invalid": 0,
+            },
         },
     )
 
@@ -191,6 +210,10 @@ def recovery_after_shock(seed: int = 29) -> Scenario:
             "shock_tick": shock_tick,
             "recovery_start_tick": recovery_start,
             "expected_return_to_monitoring": True,
+            "thresholds": {
+                "min_breaches": 1,
+                "require_return_to_monitoring": True,
+            },
         },
     )
 
@@ -220,7 +243,9 @@ def fat_tail_noise(seed: int = 31) -> Scenario:
             "stress_type": "operational_then_fundamental",
             "operational_spike_ticks": operational_spikes,
             "fundamental_start_tick": fundamental_start,
+            "anomaly_window": [operational_spikes[0], DEFAULT_TICKS - 1],
             "expected_high_kurtosis": True,
+            "thresholds": {},  # Document-only until stress policy is defined.
         },
     )
 

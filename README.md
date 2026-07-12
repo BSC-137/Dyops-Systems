@@ -435,9 +435,15 @@ cd dyops_core
 cargo test
 source .venv/bin/activate
 python bench_batch.py
+python -m unittest discover -s tests -v
+python -m scenarios.run --list
+python -m scenarios.run --scenario slow_drift --json
+python -m scenarios.run --all --json  # Threshold-gated; exits 1 on failure
 ```
 
-`scenario_test.py` is an optional Matplotlib harness for synthetic scenarios.
+The headless scenario framework runs deterministic market and feed stresses through
+the full `DyopsSentinel.process_event` policy path, checks replay and scenario
+thresholds, and can emit strict JSON results.
 
 ---
 

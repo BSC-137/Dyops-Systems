@@ -77,6 +77,7 @@ python -m unittest discover -s tests -v
 python bench_batch.py      # After maturin develop
 python -m scenarios.run --list
 python -m scenarios.run --scenario slow_drift --json
+python -m scenarios.run --all --json  # Threshold-gated; exits 1 on failure
 ```
 
 ## Configuration
