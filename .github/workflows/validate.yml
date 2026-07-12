@@ -1,0 +1,74 @@
+name: Validate
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-test:
+    name: Rust tests
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dyops_core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyops_core -> target
+
+      - name: Run Rust tests
+        run: cargo test --locked
+
+  python-scenarios:
+    name: Python scenarios
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: dyops_core
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.10"
+          cache: pip
+          cache-dependency-path: dyops_core/pyproject.toml
+
+      - name: Install stable Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache Cargo
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: dyops_core -> target
+
+      - name: Create validation environment
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install --upgrade pip maturin numpy loguru
+          echo "${{ github.workspace }}/dyops_core/.venv/bin" >> "$GITHUB_PATH"
+
+      - name: Build Python extension
+        run: maturin develop --release --locked
+
+      - name: Run threshold-gated scenarios
+        run: python -m scenarios.run --all
+
+      - name: Run Python unit tests
+        run: python -m unittest discover -s tests -v

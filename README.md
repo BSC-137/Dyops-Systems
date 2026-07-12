@@ -14,6 +14,8 @@ Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/REA
 The measurement, escalation, and validation boundaries are documented in
 [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 
+**CI runs the Rust tests and threshold-gated scenario suite on every pull request to `main`.**
+
 ---
 
 ## What Dyops does
