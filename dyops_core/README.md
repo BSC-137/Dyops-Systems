@@ -9,8 +9,8 @@ Dyops is a **tokenized-asset basis monitoring** stack: a Rust + PyO3 **Kalman ob
 | Path | Purpose |
 |------|---------|
 | `dyops_core/` | Rust crate **`dyops_core`** (Python import **`dyops_core`**) + Python modules |
-| `dyops_core/src/` | `lib.rs` (PyO3), `observer.rs` (filter + ring buffer + batch API) |
-| `dyops_core/sentinel.py` | `DyopsSentinel`, `AgenticAuditor` (Google **Gen AI** unified SDK) |
+| `dyops_core/src/` | `lib.rs` (PyO3), `observer.rs` (filter + ring buffer + batch API), `sentinel.rs` (breach/audit policy) |
+| `dyops_core/sentinel.py` | Thin `DyopsSentinel` integration wrapper and `AgenticAuditor` (Google **Gen AI** unified SDK) |
 | `dyops_core/dashboard.py` | Streamlit **Basis Guard** UI (Binance WebSocket + persistence) |
 | `dyops_core/bench_batch.py` | Batch vs loop benchmark |
 | `dyops_core/scenarios/` | Headless sentinel scenario catalog, runner, and CLI |
@@ -30,11 +30,12 @@ Dyops is a **tokenized-asset basis monitoring** stack: a Rust + PyO3 **Kalman ob
 
 - **State** \(x = [b, v, \mu]\): log-basis, velocity, mean level; **critically damped OU** discrete map with mean-reversion speed **θ**.
 - **Joseph-form** covariance update for numerical PSD safety.
-- **API**: `BasisObserver`, `update`, `update_batch` (NumPy `float64` arrays), ring buffer diagnostics, `get_window_stats`, `get_criticality_score`, `get_criticality_recent`, `get_last_innovations`, `get_basis_velocity`.
+- **API**: `BasisObserver`, `DyopsSentinelCore`, `update`, `update_batch` (NumPy `float64` arrays), ring buffer diagnostics, `get_window_stats`, `get_criticality_score`, `get_criticality_recent`, `get_last_innovations`, `get_basis_velocity`.
 
-### Sentinel (`sentinel.py`)
+### Sentinel (`src/sentinel.rs`, `sentinel.py`)
 
-- **DyopsSentinel**: breach (Mahalanobis > 3), audit snapshots when rolling criticality exceeds threshold, optional async audit dispatch. **`AUDIT_COOLDOWN_TICKS=25`** limits repeated snapshots during a sustained AUDIT state to one every 25 processed ticks.
+- **Rust `SentinelPolicy` / `DyopsSentinelCore`**: owns the observer and applies breach (Mahalanobis > 3), rolling-criticality audit, and snapshot cooldown policy.
+- **Python `DyopsSentinel`**: delegates each event to Rust and retains persistence, logging, callbacks, and optional async audit dispatch. **`AUDIT_COOLDOWN_TICKS=25`** limits repeated snapshots during a sustained AUDIT state to one every 25 processed ticks.
 - **Telemetry naming**: `process_event` / `EventResult` (with `process_tick` / `TickResult` aliases).
 - **AgenticAuditor**: **`google-genai`** client, model default **`gemini-3-flash`**, `GenerateContentConfig` with **`system_instruction`** and **`response_mime_type="application/json"`**; network I/O via **`asyncio.to_thread`**.
 

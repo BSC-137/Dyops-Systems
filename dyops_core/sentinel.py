@@ -31,12 +31,11 @@ from database import PersistenceManager
 
 DEFAULT_GEMINI_MODEL = os.environ.get("DYOPS_GEMINI_MODEL", "gemini-3-flash")
 AUDITS_DIR = Path(__file__).resolve().parent / "audits"
-MAHALANOBIS_BREACH = 3.0
-CRITICALITY_WINDOW_EVENTS = 100
+MAHALANOBIS_BREACH = float(dyops_core.MAHALANOBIS_BREACH)
+CRITICALITY_WINDOW_EVENTS = int(dyops_core.CRITICALITY_WINDOW)
 CRITICALITY_WINDOW_TICKS = CRITICALITY_WINDOW_EVENTS  # deprecated alias
-CRITICALITY_AUDIT_PCT = 15.0
-AUDIT_COOLDOWN_TICKS = 25
-INNOVATION_STREAM_LEN = 50
+CRITICALITY_AUDIT_PCT = float(dyops_core.CRITICALITY_AUDIT_PCT)
+AUDIT_COOLDOWN_TICKS = int(dyops_core.AUDIT_COOLDOWN_TICKS)
 
 
 def _json_safe_float(x: float) -> float | None:
@@ -69,8 +68,10 @@ TickResult = EventResult
 
 class DyopsSentinel:
     """
-    Wraps `dyops_core.BasisObserver` with breach detection, rolling criticality,
-    snapshot assembly, and optional async Gemini audit dispatch.
+    Thin Python integration wrapper around the Rust `DyopsSentinelCore`.
+
+    Rust owns observer updates, breach/audit policy, and snapshot diagnostics.
+    Python retains persistence, logging, callbacks, and optional Gemini dispatch.
     """
 
     def __init__(
@@ -85,57 +86,20 @@ class DyopsSentinel:
         on_audit: Optional[Callable[[dict[str, Any]], None]] = None,
         persistence: Optional[PersistenceManager] = None,
     ) -> None:
-        self.observer = observer
+        self._core = dyops_core.DyopsSentinelCore(
+            observer,
+            criticality_window=criticality_window,
+            audit_criticality_pct=audit_criticality_pct,
+            audit_cooldown_ticks=audit_cooldown_ticks,
+        )
+        self.observer = self._core
         self.auditor = auditor
-        self.criticality_window = criticality_window
-        self.audit_criticality_pct = audit_criticality_pct
-        if audit_cooldown_ticks < 0:
-            raise ValueError("audit_cooldown_ticks must be non-negative")
-        self.audit_cooldown_ticks = audit_cooldown_ticks
+        self.criticality_window = self._core.criticality_window
+        self.audit_criticality_pct = self._core.audit_criticality_pct
+        self.audit_cooldown_ticks = self._core.audit_cooldown_ticks
         self.audits_path = Path(audits_path)
         self.on_audit = on_audit
         self.persistence = persistence
-        self._last_breach_health: Optional[dyops_core.SystemHealth] = None
-        self._audit_active = False
-        self._event_tick = 0
-        self._last_audit_snapshot_tick: Optional[int] = None
-
-    def _build_snapshot(
-        self,
-        *,
-        breach_health: Optional[dyops_core.SystemHealth],
-        reason: str,
-    ) -> dict[str, Any]:
-        ws = self.observer.get_window_stats()
-        basis, velocity = self.observer.get_basis_velocity()
-        stream = self.observer.get_last_innovations(INNOVATION_STREAM_LEN)
-        snap: dict[str, Any] = {
-            "schema_version": 1,
-            "reason": reason,
-            "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-            "innovation_stream": stream,
-            "window_metrics": {
-                "mean": _json_safe_float(ws.mean),
-                "variance": _json_safe_float(ws.variance),
-                "kurtosis": _json_safe_float(ws.kurtosis),
-            },
-            "basis_state": {
-                "filtered_basis": basis,
-                "velocity": velocity,
-            },
-            "criticality_full_ring_pct": self.observer.get_criticality_score(),
-            "criticality_recent_window_pct": self.observer.get_criticality_recent(
-                self.criticality_window
-            ),
-        }
-        if breach_health is not None:
-            snap["breach_health"] = {
-                "filtered_basis": breach_health.filtered_basis,
-                "innovation": breach_health.innovation,
-                "mahalanobis_distance": breach_health.mahalanobis_distance,
-                "measurement_valid": breach_health.measurement_valid,
-            }
-        return snap
 
     def _maybe_schedule_audit(self, snapshot: dict[str, Any]) -> None:
         """Fire-and-forget audit when a running asyncio loop exists (sync `process_event`)."""
@@ -175,63 +139,51 @@ class DyopsSentinel:
         schedule_background_audit: bool = True,
     ) -> EventResult:
         """
-        Ingest one telemetry packet: Kalman update, breach / audit rules, optional async audit.
+        Delegate one telemetry packet to Rust, then run Python-only integrations.
         """
-        health = self.observer.update(timestamp, physical_price, token_price)
-        crit_recent = self.observer.get_criticality_recent(self.criticality_window)
-        event_tick = self._event_tick
-        self._event_tick += 1
-        level = SentinelLevel.MONITORING
-        snapshot: Optional[dict[str, Any]] = None
-        breach_health_for_snap: Optional[dyops_core.SystemHealth] = None
+        core_result = self._core.process_event(
+            timestamp,
+            physical_price,
+            token_price,
+        )
+        health = core_result["health"]
+        crit_recent = float(core_result["criticality_recent_pct"])
+        level = SentinelLevel[core_result["level"]]
+        snapshot = core_result["snapshot"]
 
-        if health.measurement_valid and health.mahalanobis_distance > MAHALANOBIS_BREACH:
-            level = SentinelLevel.BREACH
-            self._last_breach_health = health
-            breach_health_for_snap = health
+        if core_result["breach"]:
             logger.opt(colors=True).info(
                 "<red>🔴 BREACH DETECTED</red> | mahalanobis={:.4f} | innovation={:.6f}",
                 health.mahalanobis_distance,
                 health.innovation,
             )
 
-        if crit_recent > self.audit_criticality_pct:
-            level = SentinelLevel.AUDIT
-            should_snapshot = (
-                not self._audit_active
-                or self.audit_cooldown_ticks == 0
-                or self._last_audit_snapshot_tick is None
-                or event_tick - self._last_audit_snapshot_tick
-                >= self.audit_cooldown_ticks
+        if snapshot is not None:
+            snapshot.update(
+                {
+                    "schema_version": 1,
+                    "reason": "criticality_window",
+                    "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                }
             )
-            self._audit_active = True
-            if should_snapshot:
-                snapshot = self._build_snapshot(
-                    breach_health=breach_health_for_snap or self._last_breach_health,
-                    reason="criticality_window",
-                )
-                self._last_audit_snapshot_tick = event_tick
-                logger.warning(
-                    "<yellow>🟠 AUDIT SNAPSHOT</yellow> | last {} telemetry packets "
-                    "criticality {:.2f}% (> {:.1f}%) | cooldown {} ticks",
-                    self.criticality_window,
-                    crit_recent,
-                    self.audit_criticality_pct,
-                    self.audit_cooldown_ticks,
-                )
-                if self.on_audit:
-                    self.on_audit(snapshot)
-                if schedule_background_audit:
-                    self._maybe_schedule_audit(snapshot)
-
-        else:
-            self._audit_active = False
-            if level == SentinelLevel.BREACH and breach_health_for_snap is not None:
-                logger.debug(
-                    "Breach captured | basis={:.6f} | innovation={:.6f}",
-                    breach_health_for_snap.filtered_basis,
-                    breach_health_for_snap.innovation,
-                )
+            logger.warning(
+                "<yellow>🟠 AUDIT SNAPSHOT</yellow> | last {} telemetry packets "
+                "criticality {:.2f}% (> {:.1f}%) | cooldown {} ticks",
+                self.criticality_window,
+                crit_recent,
+                self.audit_criticality_pct,
+                self.audit_cooldown_ticks,
+            )
+            if self.on_audit:
+                self.on_audit(snapshot)
+            if schedule_background_audit:
+                self._maybe_schedule_audit(snapshot)
+        elif level == SentinelLevel.BREACH:
+            logger.debug(
+                "Breach captured | basis={:.6f} | innovation={:.6f}",
+                health.filtered_basis,
+                health.innovation,
+            )
 
         if self.persistence is not None:
             self.persistence.schedule_event(

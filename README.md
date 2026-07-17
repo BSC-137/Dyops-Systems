@@ -188,7 +188,7 @@ Tokenized assets (LSTs, stablecoin pairs, wrapped tokens) can drift from their r
 | Path | Role |
 |------|------|
 | [`dyops_core/`](dyops_core/) | **Rust crate** (PyO3 module `dyops_core`) and **Python modules**: `sentinel.py`, `database.py`, `binance_feed.py`, `dashboard.py`, tests/bench |
-| [`dyops_core/src/`](dyops_core/src/) | `observer.rs` (filter, ring buffer, batch updates), `lib.rs` (PyO3 exports) |
+| [`dyops_core/src/`](dyops_core/src/) | `observer.rs` (filter, ring buffer, batch updates), `sentinel.rs` (breach/audit policy), `lib.rs` (PyO3 exports) |
 | [`dyops_core/scenarios/`](dyops_core/scenarios/) | Deterministic market and feed stress scenarios, threshold definitions, and CLI runner |
 | [`dyops_core/tests/`](dyops_core/tests/) | Python unit, sentinel-policy, replay, and scenario-threshold tests |
 | [`backend/main.py`](backend/main.py) | **FastAPI** app: lifespan, REST, WebSockets, integration with sentinel + feed + persistence |
@@ -224,10 +224,11 @@ Generated / local artifacts (typically gitignored or not committed):
 
 #### 2. `DyopsSentinel` (`sentinel.py`)
 
-- Wraps **`BasisObserver`** with policy:
+- Thin Python integration wrapper around Rust **`DyopsSentinelCore`**, which owns the **`BasisObserver`** and policy:
   - **BREACH** when measurement is valid and **Mahalanobis distance** exceeds **`MAHALANOBIS_BREACH`** (default `3.0`).
   - **AUDIT** when **rolling criticality** over the last **`CRITICALITY_WINDOW_EVENTS`** exceeds **`CRITICALITY_AUDIT_PCT`** (default `15%`).
   - **AUDIT snapshot cooldown** defaults to **`AUDIT_COOLDOWN_TICKS=25`**, limiting repeated snapshots during a sustained AUDIT state to one every 25 processed ticks.
+- Python retains persistence, operational logging, callbacks, and optional Gemini dispatch.
 - **`process_event`** returns **`EventResult`**: `level` (`MONITORING` / `BREACH` / `AUDIT`), `health`, optional **`snapshot`** dict for the auditor, `criticality_recent_pct`.
 - **`AgenticAuditor`** (optional): uses **`google-genai`**, default model from **`DYOPS_GEMINI_MODEL`** (`gemini-3-flash`). When an audit runs, results are saved as JSON files and, if **`PersistenceManager`** is wired, **`schedule_audit`** stores the full report in SQLite.
 

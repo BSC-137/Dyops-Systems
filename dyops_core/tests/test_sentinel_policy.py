@@ -1,8 +1,8 @@
 from __future__ import annotations
 
 import unittest
-from dataclasses import dataclass
 
+import dyops_core
 from loguru import logger
 
 from sentinel import DyopsSentinel, SentinelLevel
@@ -10,46 +10,20 @@ from sentinel import DyopsSentinel, SentinelLevel
 logger.disable("sentinel")
 
 
-@dataclass
-class _Health:
-    filtered_basis: float = 0.0
-    innovation: float = 0.0
-    mahalanobis_distance: float = 0.0
-    measurement_valid: bool = True
-
-
-@dataclass
-class _WindowStats:
-    mean: float = 0.0
-    variance: float = 0.0
-    kurtosis: float = 0.0
-
-
-class _AlwaysCriticalObserver:
-    def update(self, timestamp: float, physical: float, token: float) -> _Health:
-        return _Health()
-
-    def get_criticality_recent(self, window: int) -> float:
-        return 20.0
-
-    def get_window_stats(self) -> _WindowStats:
-        return _WindowStats()
-
-    def get_basis_velocity(self) -> tuple[float, float]:
-        return 0.0, 0.0
-
-    def get_last_innovations(self, count: int) -> list[float]:
-        return [0.0]
-
-    def get_criticality_score(self) -> float:
-        return 20.0
+def _observer() -> dyops_core.BasisObserver:
+    return dyops_core.BasisObserver(
+        name="sentinel-policy-test",
+        theta=1.0,
+        ring_buffer_capacity=1000,
+    )
 
 
 class SentinelAuditPolicyTests(unittest.TestCase):
     def test_sustained_audit_snapshots_respect_cooldown(self) -> None:
         captured: list[dict[str, object]] = []
         sentinel = DyopsSentinel(
-            _AlwaysCriticalObserver(),
+            _observer(),
+            audit_criticality_pct=-1.0,
             audit_cooldown_ticks=3,
             on_audit=captured.append,
         )
@@ -76,7 +50,7 @@ class SentinelAuditPolicyTests(unittest.TestCase):
     def test_negative_audit_cooldown_is_rejected(self) -> None:
         with self.assertRaises(ValueError):
             DyopsSentinel(
-                _AlwaysCriticalObserver(),
+                _observer(),
                 audit_cooldown_ticks=-1,
             )
 

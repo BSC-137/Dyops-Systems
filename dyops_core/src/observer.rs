@@ -3,6 +3,8 @@
 use nalgebra::{Matrix3, RowVector3, Vector3};
 use std::collections::VecDeque;
 
+use crate::sentinel::MAHALANOBIS_BREACH;
+
 /// Output of one filter step: filtered estimate, innovation, and normalized surprise (Mahalanobis).
 #[derive(Clone, Debug, PartialEq)]
 pub struct SystemHealth {
@@ -48,6 +50,7 @@ pub struct ObserverInit {
 }
 
 /// State-space observer: basis (log physical / token), velocity, mean level — critically damped OU discretization.
+#[derive(Clone)]
 pub struct BasisObserver {
     name: String,
     theta: f64,
@@ -159,7 +162,7 @@ impl BasisObserver {
         }
     }
 
-    /// Percent of ring samples with Mahalanobis distance strictly greater than 3.0.
+    /// Percent of ring samples above the sentinel Mahalanobis breach threshold.
     pub fn criticality_score(&self) -> f64 {
         if self.ring.is_empty() || self.ring_cap == 0 {
             return 0.0;
@@ -167,7 +170,7 @@ impl BasisObserver {
         let hi = self
             .ring
             .iter()
-            .filter(|s| s.mahalanobis > 3.0)
+            .filter(|s| s.mahalanobis > MAHALANOBIS_BREACH)
             .count();
         100.0 * (hi as f64) / (self.ring.len() as f64)
     }
@@ -191,7 +194,7 @@ impl BasisObserver {
         (self.x[0], self.x[1])
     }
 
-    /// `%` of samples with Mahalanobis > 3 among the last `window` ring entries (full buffer if shorter).
+    /// `%` of samples above the sentinel breach threshold among the last `window` entries.
     pub fn criticality_recent(&self, window: usize) -> f64 {
         if window == 0 || self.ring.is_empty() {
             return 0.0;
@@ -202,7 +205,7 @@ impl BasisObserver {
             .ring
             .iter()
             .skip(skip)
-            .filter(|s| s.mahalanobis > 3.0)
+            .filter(|s| s.mahalanobis > MAHALANOBIS_BREACH)
             .count();
         100.0 * (hi as f64) / (w as f64)
     }
