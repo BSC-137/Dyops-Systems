@@ -14,10 +14,15 @@ Dyops is a **tokenized-asset basis monitoring** stack: a Rust + PyO3 **Kalman ob
 | `dyops_core/dashboard.py` | Streamlit **Basis Guard** UI (Binance WebSocket + persistence) |
 | `dyops_core/bench_batch.py` | Batch vs loop benchmark |
 | `dyops_core/scenarios/` | Headless sentinel scenario catalog, runner, and CLI |
+| `dyops_core/tests/` | Python unit, sentinel-policy, replay, and scenario-threshold tests |
 | `dyops_core/database.py` | SQLite `PersistenceManager` (events + audits) |
 | `dyops_core/binance_feed.py` | Binance Spot WebSocket feed (stable / LST) |
 | `dyops_core/audits/` | JSON audit records (artifacts ignored by git; folder tracked) |
 | `dyops_core/.streamlit/config.toml` | Streamlit theme |
+| `docs/` | Methodology and validation-boundary documentation |
+| `reports/` | Generated robustness evidence, including the [partner evidence pack](../reports/robustness_report.md) |
+| `scripts/` | Robustness report generation and repository utility scripts |
+| `.github/workflows/` | Pull-request and `main` validation workflows |
 
 ## Features (engineering summary)
 
@@ -29,7 +34,7 @@ Dyops is a **tokenized-asset basis monitoring** stack: a Rust + PyO3 **Kalman ob
 
 ### Sentinel (`sentinel.py`)
 
-- **DyopsSentinel**: breach (Mahalanobis > 3), audit snapshots when rolling criticality exceeds threshold, optional async audit dispatch.
+- **DyopsSentinel**: breach (Mahalanobis > 3), audit snapshots when rolling criticality exceeds threshold, optional async audit dispatch. **`AUDIT_COOLDOWN_TICKS=25`** limits repeated snapshots during a sustained AUDIT state to one every 25 processed ticks.
 - **Telemetry naming**: `process_event` / `EventResult` (with `process_tick` / `TickResult` aliases).
 - **AgenticAuditor**: **`google-genai`** client, model default **`gemini-3-flash`**, `GenerateContentConfig` with **`system_instruction`** and **`response_mime_type="application/json"`**; network I/O via **`asyncio.to_thread`**.
 
@@ -75,9 +80,7 @@ streamlit run dashboard.py
 cargo test                 # Rust unit tests
 python -m unittest discover -s tests -v
 python bench_batch.py      # After maturin develop
-python -m scenarios.run --list
-python -m scenarios.run --scenario slow_drift --json
-python -m scenarios.run --all --json  # Threshold-gated; exits 1 on failure
+python -m scenarios.run --all --quiet --summary  # Threshold-gated; exits 1 on failure
 ```
 
 ## Configuration
