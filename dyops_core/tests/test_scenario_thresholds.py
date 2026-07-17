@@ -49,6 +49,36 @@ class ScenarioThresholdTests(unittest.TestCase):
         self.assertTrue(metrics["invalid_tick_handling"])
         self.assertTrue(metrics["replay_consistency"])
 
+    def test_oracle_lag_passes_latency_and_audit_occupancy(self) -> None:
+        scenario = get_catalog()["oracle_lag"]
+        result = self.results["oracle_lag"]
+        thresholds = scenario.expected_outcomes["thresholds"]
+
+        self.assertTrue(result.passed, result.failures)
+        self.assertLessEqual(
+            result.extended_metrics["time_to_first_breach_ticks"],
+            thresholds["max_time_to_first_breach_ticks"],
+        )
+        self.assertLessEqual(
+            result.extended_metrics["audit_pct"],
+            thresholds["max_audit_pct"],
+        )
+
+    def test_fat_tail_passes_breach_and_false_positive_thresholds(self) -> None:
+        scenario = get_catalog()["fat_tail_noise"]
+        result = self.results["fat_tail_noise"]
+        thresholds = scenario.expected_outcomes["thresholds"]
+
+        self.assertTrue(result.passed, result.failures)
+        self.assertGreaterEqual(
+            result.extended_metrics["breach_count"],
+            thresholds["min_breaches"],
+        )
+        self.assertLessEqual(
+            result.extended_metrics["false_positive_rate"],
+            thresholds["max_false_positive_rate"],
+        )
+
     def test_evaluate_thresholds_reports_breach_limit(self) -> None:
         scenario = get_catalog()["sudden_depeg"]
         expected = copy.deepcopy(scenario.expected_outcomes)

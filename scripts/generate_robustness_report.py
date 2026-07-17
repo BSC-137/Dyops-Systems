@@ -85,6 +85,10 @@ def _markdown(
                 "- Ring buffer capacity: "
                 f"`{observer_parameters['ring_buffer_capacity']}`"
             ),
+            (
+                "- AUDIT snapshot cooldown: "
+                f"`{observer_parameters['audit_cooldown_ticks']}` ticks"
+            ),
             "- Process and measurement noise: production defaults",
             "",
             "## Scenario results",

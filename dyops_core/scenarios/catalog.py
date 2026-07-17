@@ -74,7 +74,7 @@ def slow_drift(seed: int = 11) -> Scenario:
             "drift_start_tick": WARMUP_TICKS,
             "expected_terminal_level": "MONITORING",
             "expected_escalation": False,
-            # TODO: Option B: require breach if product wants slow-drift alarms.
+            # TODO (Option B): require breach if product wants slow-drift alarms.
             "thresholds": {"max_breaches": 0},
         },
     )
@@ -157,7 +157,15 @@ def oracle_lag(seed: int = 19) -> Scenario:
             "lag_ticks": lag_ticks,
             "anomaly_window": [lag_ticks, n - 1],
             "expected_transient_breaches": True,
-            "thresholds": {},  # Document-only until operational policy is defined.
+            "max_allowed_latency_ticks": 20,
+            "expected_behavior": (
+                "Transient breaches are acceptable, but sustained AUDIT occupancy "
+                "must remain at or below 90% of the run."
+            ),
+            "thresholds": {
+                "max_time_to_first_breach_ticks": 20,
+                "max_audit_pct": 90.0,
+            },
         },
     )
 
@@ -245,7 +253,10 @@ def fat_tail_noise(seed: int = 31) -> Scenario:
             "fundamental_start_tick": fundamental_start,
             "anomaly_window": [operational_spikes[0], DEFAULT_TICKS - 1],
             "expected_high_kurtosis": True,
-            "thresholds": {},  # Document-only until stress policy is defined.
+            "thresholds": {
+                "min_breaches": 1,
+                "max_false_positive_rate": 0.0,
+            },
         },
     )
 

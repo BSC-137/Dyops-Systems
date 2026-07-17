@@ -155,6 +155,7 @@ def compute_extended_metrics(
         ),
         "breach_count": len(breach_ticks),
         "audit_count": len(audit_ticks),
+        "audit_pct": 100.0 * len(audit_ticks) / tick_count if tick_count else 0.0,
         "max_mahalanobis": max(window_mahalanobis, default=None),
         "p95_mahalanobis": _percentile(window_mahalanobis, 0.95),
         "drift_start_tick": scenario.expected_outcomes.get("drift_start_tick"),
@@ -212,6 +213,18 @@ def evaluate_thresholds(
         maximum = int(thresholds["max_time_to_first_breach_ticks"])
         if actual is None or actual > maximum:
             fail("time_to_first_breach_ticks", actual, "<=", maximum)
+
+    if "max_false_positive_rate" in thresholds:
+        actual = metrics["false_positive_rate"]
+        maximum = float(thresholds["max_false_positive_rate"])
+        if actual is None or float(actual) > maximum:
+            fail("false_positive_rate", actual, "<=", maximum)
+
+    if "max_audit_pct" in thresholds:
+        actual = float(metrics["audit_pct"])
+        maximum = float(thresholds["max_audit_pct"])
+        if actual > maximum:
+            fail("audit_pct", actual, "<=", maximum)
 
     replay_limit = float(
         thresholds.get(

@@ -233,6 +233,7 @@ def run_scenario(
             "measurement_noise": "dyops_core default",
             "criticality_window": sentinel.criticality_window,
             "audit_criticality_pct": sentinel.audit_criticality_pct,
+            "audit_cooldown_ticks": sentinel.audit_cooldown_ticks,
         },
         ticks=ticks,
         metrics=basic_metrics,

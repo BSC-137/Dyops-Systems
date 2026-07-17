@@ -53,6 +53,14 @@ this property explicitly. AUDIT snapshots include recent innovations, window
 statistics, filtered state, criticality, and the most recent breach health where
 available.
 
+AUDIT severity and AUDIT side effects are deliberately separate. A sustained critical
+window remains at level AUDIT on every tick, preserving the state operators and APIs
+see, but snapshots, warning logs, callbacks, and optional Gemini dispatch are emitted
+at most once every 25 ticks. A new transition into AUDIT always emits immediately.
+This cooldown avoids duplicate evidence and repeated external work without masking the
+duration of the elevated state. It is not a claim that the underlying condition has
+recovered, and it does not alter BREACH or AUDIT counts.
+
 ## Scenario evidence
 
 The catalog uses fixed random seeds and labeled synthetic regimes: stable tracking,
@@ -69,10 +77,17 @@ reported as operational context, but is host-dependent and is not a fixed servic
 guarantee.
 
 The current threshold set intentionally records two limitations. `slow_drift` does not
-breach under the present production observer settings and is gated to remain silent;
-this does not demonstrate slow-drift detection. `oracle_lag` is audit-heavy, so an
-operationally delayed feed can sustain escalation and may require downstream
-classification or policy refinement.
+breach under the present production observer settings and remains gated to zero
+breaches. **TODO (Option B):** require a breach if the product policy is changed to
+promise slow-drift alarms; no such change is made by the current thresholds.
+
+`oracle_lag` permits transient breaches, requires the first post-lag breach within 20
+ticks, and caps full-run AUDIT occupancy at `90%`. The cap is intentionally close to
+the current deterministic result because operational lag is audit-heavy; it establishes
+a regression bound rather than claiming that the behavior is already optimal.
+`fat_tail_noise` requires at least one breach from tick 92 onward and zero pre-window
+false-positive rate. Together these gates distinguish tolerated operational lag from
+the required response to labeled heavy-tail stress.
 
 ## Deterministic and optional components
 
