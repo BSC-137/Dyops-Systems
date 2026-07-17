@@ -9,6 +9,7 @@ from unittest.mock import patch
 
 from loguru import logger
 
+from scenarios.base import Scenario
 from scenarios.catalog import get_catalog
 from scenarios.metrics import evaluate_thresholds
 from scenarios.runner import ScenarioResult, run_scenario
@@ -117,6 +118,27 @@ class ScenarioThresholdTests(unittest.TestCase):
             exit_code = cli.main(["--all", "--json"])
 
         self.assertEqual(exit_code, 1)
+
+    def test_all_summary_is_quiet_and_prints_final_banner(self) -> None:
+        from scenarios import run as cli
+
+        def cached_run(scenario: Scenario) -> ScenarioResult:
+            return self.results[scenario.name]
+
+        output = io.StringIO()
+        with (
+            patch("scenarios.runner.run_scenario", side_effect=cached_run),
+            patch.object(logger, "disable") as disable_logging,
+            redirect_stdout(output),
+        ):
+            exit_code = cli.main(["--all", "--summary"])
+
+        rendered = output.getvalue()
+        self.assertEqual(exit_code, 0)
+        disable_logging.assert_called_once_with("sentinel")
+        self.assertIn("[PASS] oracle_lag", rendered)
+        self.assertIn("8/8 scenarios passed", rendered)
+        self.assertNotIn('"ticks":', rendered)
 
 
 if __name__ == "__main__":

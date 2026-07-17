@@ -49,6 +49,12 @@ pip install -e .
 maturin develop --release
 ```
 
+Run the concise validation suite from `dyops_core/`:
+
+```bash
+python -m scenarios.run --all --quiet --summary
+```
+
 From **repo root** (same venv):
 
 ```bash
@@ -442,7 +448,7 @@ python bench_batch.py
 python -m unittest discover -s tests -v
 python -m scenarios.run --list
 python -m scenarios.run --scenario slow_drift --json
-python -m scenarios.run --all --json  # Threshold-gated; exits 1 on failure
+python -m scenarios.run --all --quiet --summary
 ```
 
 The headless scenario framework runs deterministic market and feed stresses through
@@ -452,7 +458,7 @@ thresholds, and can emit strict JSON results.
 Run validation:
 
 ```bash
-cd dyops_core && python -m scenarios.run --all
+cd dyops_core && python -m scenarios.run --all --quiet --summary
 ```
 
 Generate the partner-facing robustness evidence from the repository root with the

@@ -19,7 +19,24 @@ def _parser() -> argparse.ArgumentParser:
     )
     selection.add_argument("--all", action="store_true", help="run the entire catalog")
     parser.add_argument("--seed", type=int, help="override the deterministic random seed")
-    parser.add_argument("--json", action="store_true", help="emit the full result as JSON")
+    output = parser.add_mutually_exclusive_group()
+    output.add_argument("--json", action="store_true", help="emit the full result as JSON")
+    output.add_argument(
+        "--summary",
+        action="store_true",
+        help="print one metrics line per scenario",
+    )
+    logging = parser.add_mutually_exclusive_group()
+    logging.add_argument(
+        "--quiet",
+        action="store_true",
+        help="disable sentinel Loguru output during the run",
+    )
+    logging.add_argument(
+        "--verbose",
+        action="store_true",
+        help="retain sentinel logs (--all is quiet by default)",
+    )
     parser.add_argument(
         "--strict",
         action="store_true",
@@ -55,6 +72,40 @@ def _print_result(result: object) -> None:
     print("Expected: " + json.dumps(result.expected_outcomes, sort_keys=True))
 
 
+def _format_number(value: object, format_spec: str) -> str:
+    return "n/a" if value is None else format(value, format_spec)
+
+
+def _print_summary(result: object) -> None:
+    metrics = result.extended_metrics
+    status = "PASS" if result.passed else "FAIL"
+    first_breach = metrics["time_to_first_breach_ticks"]
+    print(
+        f"[{status}] {result.scenario} "
+        f"breaches={metrics['breach_count']} "
+        f"audits={metrics['audit_count']} "
+        f"first_breach={first_breach if first_breach is not None else 'n/a'} "
+        "max_mahalanobis="
+        f"{_format_number(metrics['max_mahalanobis'], '.6g')} "
+        f"replay_error={_format_number(metrics['replay_max_abs_error'], '.3g')}"
+    )
+
+
+def _print_all_banner(results: list[object]) -> None:
+    passed = sum(result.passed for result in results)
+    total = len(results)
+    print(f"{passed}/{total} scenarios passed")
+    failures = [result for result in results if not result.passed]
+    if failures:
+        print(
+            "Failures: "
+            + "; ".join(
+                f"{result.scenario}: {', '.join(result.failures)}"
+                for result in failures
+            )
+        )
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = _parser()
     args = parser.parse_args(argv)
@@ -67,6 +118,14 @@ def main(argv: list[str] | None = None) -> int:
 
     if not args.scenario and not args.all:
         parser.error("one of --list, --scenario, or --all is required")
+
+    from loguru import logger
+
+    quiet = args.quiet or (args.all and not args.verbose)
+    if quiet:
+        logger.disable("sentinel")
+    elif args.verbose:
+        logger.enable("sentinel")
 
     from .runner import run_scenario
 
@@ -91,11 +150,18 @@ def main(argv: list[str] | None = None) -> int:
             )
         else:
             print(results[0].to_json(indent=2))
+    elif args.summary:
+        for result in results:
+            _print_summary(result)
     else:
         for index, result in enumerate(results):
             if index:
                 print()
             _print_result(result)
+
+    if args.all and not args.json:
+        print()
+        _print_all_banner(results)
 
     strict = args.strict or args.all
     return 1 if strict and not all_passed else 0
