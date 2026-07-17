@@ -448,12 +448,23 @@ On **`stable`** (e.g. USDC/USDT), log-basis moves are **very small**. The UI’s
 
 ### Testing and benchmarks
 
-Run the backend API contract tests without Binance or Gemini from the repository
-root with the `dyops_core` virtual environment active:
+With the `dyops_core` virtual environment active, install the backend test
+dependencies from the repository root:
 
 ```bash
-pip install -r backend/requirements-test.txt
-pytest backend/tests
+pip install -r backend/requirements.txt pytest
+```
+
+Run the core Python unit tests from `dyops_core/`:
+
+```bash
+python -m unittest discover -s tests -v
+```
+
+Run the offline backend API contract tests from the repository root:
+
+```bash
+pytest backend/tests -q
 ```
 
 ```bash
@@ -461,7 +472,6 @@ cd dyops_core
 cargo test
 source .venv/bin/activate
 python bench_batch.py
-python -m unittest discover -s tests -v
 python -m scenarios.run --list
 python -m scenarios.run --scenario slow_drift --json
 python -m scenarios.run --all --quiet --summary

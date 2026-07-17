@@ -72,3 +72,15 @@ jobs:
 
       - name: Run Python unit tests
         run: python -m unittest discover -s tests -v
+
+      - name: Install backend contract test dependencies
+        working-directory: ${{ github.workspace }}
+        run: python -m pip install -r backend/requirements.txt pytest
+
+      - name: Run backend API contract tests
+        working-directory: ${{ github.workspace }}
+        env:
+          PYTHONPATH: ${{ github.workspace }}/dyops_core
+          GEMINI_API_KEY: ""
+          GOOGLE_API_KEY: ""
+        run: pytest backend/tests -q
