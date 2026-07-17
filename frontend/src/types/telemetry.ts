@@ -1,5 +1,7 @@
+export type SentinelLevel = "MONITORING" | "BREACH" | "AUDIT"
+
 export interface TelemetryPayload {
-  level: string
+  level: SentinelLevel
   level_value: number
   timestamp: number
   physical_price: number
@@ -32,6 +34,19 @@ export interface PulseResponse {
   events_total_sqlite: number
   summary?: string
   explainability?: string
+}
+
+/** GET /api/status */
+export interface StatusResponse {
+  gemini_configured: boolean
+  binance_feed: string
+  audits_dir: string
+  db_path: string
+  global_events_total_sqlite: number
+  mahalanobis_breach_threshold: number
+  criticality_window_events: number
+  criticality_audit_pct: number
+  audit_cooldown_ticks: number
 }
 
 /** GET /api/history/trace */

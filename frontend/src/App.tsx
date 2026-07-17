@@ -20,6 +20,8 @@ import type {
   ChartPoint,
   HistoryTraceBundle,
   PulseResponse,
+  SentinelLevel,
+  StatusResponse,
   TelemetryPayload,
 } from "@/types/telemetry"
 
@@ -106,6 +108,14 @@ function wsUrl(path: string) {
   return `${proto}//${window.location.host}${path}`
 }
 
+function levelBadgeVariant(
+  level: SentinelLevel,
+): "success" | "warning" | "destructive" {
+  if (level === "AUDIT") return "destructive"
+  if (level === "BREACH") return "warning"
+  return "success"
+}
+
 type HistoryApiRow = {
   t: number
   measured_basis: number
@@ -124,6 +134,13 @@ export default function App() {
   const [feedMode, setFeedMode] = useState<string>("—")
   const [mahalanobisBreachThreshold, setMahalanobisBreachThreshold] =
     useState<number>(3.0)
+  const [sentinelLevel, setSentinelLevel] =
+    useState<SentinelLevel>("MONITORING")
+  const [criticalityRecentPct, setCriticalityRecentPct] = useState(0)
+  const [criticalityWindowEvents, setCriticalityWindowEvents] = useState(0)
+  const [criticalityAuditPct, setCriticalityAuditPct] = useState(0)
+  const [auditCooldownTicks, setAuditCooldownTicks] = useState(0)
+  const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceMeta, setTraceMeta] = useState<Pick<
     HistoryTraceBundle,
     "summary" | "explainability"
@@ -132,6 +149,8 @@ export default function App() {
   const [telemetryStreamPaused, setTelemetryStreamPaused] = useState(false)
   const chartDataRef = useRef<ChartPoint[]>([])
   const auditsRef = useRef<Map<number, AuditRow>>(new Map())
+  const snapshotHighlightTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mergeChart = useCallback((point: ChartPoint) => {
     chartDataRef.current = [...chartDataRef.current, point].slice(-MAX_POINTS)
@@ -224,6 +243,18 @@ export default function App() {
             innovation: p.health.innovation,
             mahalanobis: p.health.mahalanobis_distance,
           })
+          setSentinelLevel(p.level)
+          setCriticalityRecentPct(p.criticality_recent_pct)
+          if (p.snapshot !== null) {
+            setSnapshotHighlighted(true)
+            if (snapshotHighlightTimerRef.current !== null) {
+              clearTimeout(snapshotHighlightTimerRef.current)
+            }
+            snapshotHighlightTimerRef.current = setTimeout(() => {
+              setSnapshotHighlighted(false)
+              snapshotHighlightTimerRef.current = null
+            }, 2000)
+          }
         } catch {
           /* ignore */
         }
@@ -244,6 +275,10 @@ export default function App() {
       cancelled = true
       clearReconnect()
       ws?.close()
+      if (snapshotHighlightTimerRef.current !== null) {
+        clearTimeout(snapshotHighlightTimerRef.current)
+        snapshotHighlightTimerRef.current = null
+      }
     }
   }, [mergeChart])
 
@@ -273,7 +308,6 @@ export default function App() {
   }, [upsertAudit])
 
   useEffect(() => {
-    let t: ReturnType<typeof setInterval>
     const tick = async () => {
       try {
         const [pulseR, statusR] = await Promise.all([
@@ -293,19 +327,20 @@ export default function App() {
           )
         }
         if (statusR.ok) {
-          const s = await statusR.json()
-          setGeminiOk(!!s.gemini_configured)
-          setFeedMode(String(s.binance_feed ?? "—"))
-          if (typeof s.mahalanobis_breach_threshold === "number") {
-            setMahalanobisBreachThreshold(s.mahalanobis_breach_threshold)
-          }
+          const s = (await statusR.json()) as StatusResponse
+          setGeminiOk(s.gemini_configured)
+          setFeedMode(s.binance_feed)
+          setMahalanobisBreachThreshold(s.mahalanobis_breach_threshold)
+          setCriticalityWindowEvents(s.criticality_window_events)
+          setCriticalityAuditPct(s.criticality_audit_pct)
+          setAuditCooldownTicks(s.audit_cooldown_ticks)
         }
       } catch {
         /* ignore */
       }
     }
     tick()
-    t = setInterval(tick, 2000)
+    const t = setInterval(tick, 2000)
     return () => clearInterval(t)
   }, [])
 
@@ -407,6 +442,23 @@ export default function App() {
             <span
               className={`size-2 rounded-full ${pulseLive ? "bg-emerald-600" : "bg-zinc-600"}`}
             />
+            <Badge
+              variant={levelBadgeVariant(sentinelLevel)}
+              className="text-[10px]"
+            >
+              {sentinelLevel}
+            </Badge>
+            <Badge
+              variant="outline"
+              className="border-zinc-700 text-[10px] text-stone-400"
+              title={
+                criticalityWindowEvents > 0
+                  ? `Recent criticality over ${criticalityWindowEvents} ticks; audit at ${criticalityAuditPct.toFixed(1)}%`
+                  : undefined
+              }
+            >
+              crit {criticalityRecentPct.toFixed(1)}%
+            </Badge>
           </div>
 
           <div className="flex items-center gap-2 text-xs text-zinc-500">
@@ -428,6 +480,14 @@ export default function App() {
           <Badge variant="outline" className="font-mono-nums text-[10px]">
             {feedMode}
           </Badge>
+          {auditCooldownTicks > 0 ? (
+            <Badge
+              variant="outline"
+              className="border-zinc-700 font-mono-nums text-[10px] font-normal text-zinc-500"
+            >
+              Audit cooldown {auditCooldownTicks} ticks
+            </Badge>
+          ) : null}
         </div>
       </header>
 
@@ -568,7 +628,7 @@ export default function App() {
                       strokeWidth={1}
                       ifOverflow="extendDomain"
                       label={{
-                        value: `Criticality threshold (${mahalanobisBreachThreshold})`,
+                        value: `Mahalanobis breach threshold (${mahalanobisBreachThreshold})`,
                         position: "insideTopRight",
                         fill: "#a8a29e",
                         fontSize: 10,
@@ -584,10 +644,21 @@ export default function App() {
 
         <section className="flex w-[30%] min-w-[280px] flex-col border-l border-[var(--color-border)] pl-4">
           <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-panel)] shadow-none">
-            <CardHeader className="pb-2">
-              <CardTitle className="text-xs font-medium uppercase tracking-widest text-zinc-500">
-                Structural Drift Audit
-              </CardTitle>
+            <CardHeader
+              className={`border-b pb-2 transition-colors duration-300 ${
+                snapshotHighlighted
+                  ? "border-amber-800/60 bg-amber-950/10"
+                  : "border-transparent"
+              }`}
+            >
+              <div className="flex items-center justify-between gap-2">
+                <CardTitle className="text-xs font-medium uppercase tracking-widest text-zinc-500">
+                  Structural Drift Audit
+                </CardTitle>
+                <span className="font-mono-nums text-[10px] text-zinc-600">
+                  crit {criticalityRecentPct.toFixed(1)}%
+                </span>
+              </div>
               {traceMeta ? (
                 <div className="mt-1 space-y-1 border-l border-zinc-700 pl-2">
                   <p

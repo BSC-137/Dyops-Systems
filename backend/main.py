@@ -29,8 +29,11 @@ import dyops_core  # noqa: E402
 from binance_feed import resolve_feed_mode, start_binance_feed_thread  # noqa: E402
 from database import PersistenceManager  # noqa: E402
 from sentinel import (  # noqa: E402
+    AUDIT_COOLDOWN_TICKS,
     AUDITS_DIR,
     AgenticAuditor,
+    CRITICALITY_AUDIT_PCT,
+    CRITICALITY_WINDOW_EVENTS,
     DyopsSentinel,
     EventResult,
     MAHALANOBIS_BREACH,
@@ -408,6 +411,9 @@ class StatusResponse(BaseModel):
     db_path: str
     global_events_total_sqlite: int
     mahalanobis_breach_threshold: float
+    criticality_window_events: int
+    criticality_audit_pct: float
+    audit_cooldown_ticks: int
 
 
 @app.get("/api/status", response_model=StatusResponse)
@@ -421,6 +427,9 @@ async def api_status() -> StatusResponse:
         db_path=str(_persistence.db_path.resolve()),
         global_events_total_sqlite=_persistence.count_events(),
         mahalanobis_breach_threshold=float(MAHALANOBIS_BREACH),
+        criticality_window_events=int(CRITICALITY_WINDOW_EVENTS),
+        criticality_audit_pct=float(CRITICALITY_AUDIT_PCT),
+        audit_cooldown_ticks=int(AUDIT_COOLDOWN_TICKS),
     )
 
 
