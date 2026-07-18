@@ -39,6 +39,7 @@ export interface PulseResponse {
 /** GET /api/status */
 export interface StatusResponse {
   gemini_configured: boolean
+  webhook_configured?: boolean
   binance_feed: string
   audits_dir: string
   db_path: string
@@ -79,6 +80,24 @@ export interface AuditRow {
       executive_summary?: string
     }
     model?: string
-    snapshot?: unknown
+    snapshot?: {
+      generated_at_utc?: string
+      [key: string]: unknown
+    }
   }
+}
+
+export type IncidentKind = "BREACH" | "AUDIT"
+
+export interface IncidentWindow {
+  id: string
+  kind: IncidentKind
+  startIndex: number
+  endIndex: number
+  startT: number
+  endT: number
+  tickCount: number
+  peakMahalanobis: number
+  criticalityPeakPct: number
+  audits: AuditRow[]
 }

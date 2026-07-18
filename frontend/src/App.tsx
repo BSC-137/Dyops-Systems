@@ -11,10 +11,9 @@ import {
   XAxis,
   YAxis,
 } from "recharts"
+import { IncidentsTab } from "@/components/IncidentsTab"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
-import { ScrollArea } from "@/components/ui/scroll-area"
-import { Table, TableBody, TableCell, TableHead, TableHeader, TableRow } from "@/components/ui/table"
 import type {
   AuditRow,
   ChartPoint,
@@ -126,6 +125,7 @@ type HistoryApiRow = {
 }
 
 export default function App() {
+  const [activeTab, setActiveTab] = useState<"live" | "incidents">("live")
   const [chartData, setChartData] = useState<ChartPoint[]>([])
   const [audits, setAudits] = useState<AuditRow[]>([])
   const [pulseLive, setPulseLive] = useState(false)
@@ -143,10 +143,7 @@ export default function App() {
   const [demoInjectEnabled, setDemoInjectEnabled] = useState(false)
   const [demoInjectRunning, setDemoInjectRunning] = useState(false)
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
-  const [traceMeta, setTraceMeta] = useState<Pick<
-    HistoryTraceBundle,
-    "summary" | "explainability"
-  > | null>(null)
+  const [traceBundle, setTraceBundle] = useState<HistoryTraceBundle | null>(null)
   const [pulseSummaryLine, setPulseSummaryLine] = useState("")
   const [telemetryStreamPaused, setTelemetryStreamPaused] = useState(false)
   const chartDataRef = useRef<ChartPoint[]>([])
@@ -186,6 +183,17 @@ export default function App() {
     }
   }, [])
 
+  const loadHistoryTrace = useCallback(async () => {
+    try {
+      const r = await fetch("/api/history/trace?limit=500")
+      if (!r.ok) throw new Error(String(r.status))
+      const bundle: HistoryTraceBundle = await r.json()
+      setTraceBundle(bundle)
+    } catch {
+      setTraceBundle(null)
+    }
+  }, [])
+
   useEffect(() => {
     let cancelled = false
     ;(async () => {
@@ -194,18 +202,19 @@ export default function App() {
         if (!r.ok) throw new Error(String(r.status))
         const bundle: HistoryTraceBundle = await r.json()
         if (cancelled) return
-        setTraceMeta({
-          summary: bundle.summary,
-          explainability: bundle.explainability,
-        })
+        setTraceBundle(bundle)
       } catch {
-        if (!cancelled) setTraceMeta(null)
+        if (!cancelled) setTraceBundle(null)
       }
     })()
     return () => {
       cancelled = true
     }
   }, [])
+
+  useEffect(() => {
+    if (activeTab === "incidents") void loadHistoryTrace()
+  }, [activeTab, loadHistoryTrace])
 
   useEffect(() => {
     let cancelled = false
@@ -458,7 +467,7 @@ export default function App() {
             <FlaskConical className="mr-1 size-3 opacity-70" aria-hidden />
             Methodology
           </Badge>
-          {demoInjectEnabled ? (
+          {activeTab === "live" && demoInjectEnabled ? (
             <button
               type="button"
               disabled={demoInjectRunning}
@@ -533,7 +542,30 @@ export default function App() {
         </div>
       </header>
 
-      {telemetryStreamPaused ? (
+      <nav
+        className="flex shrink-0 items-center gap-1 border-b border-[var(--color-border)] px-5 py-2"
+        role="tablist"
+        aria-label="Dyops workspace"
+      >
+        {(["live", "incidents"] as const).map((tab) => (
+          <button
+            key={tab}
+            type="button"
+            role="tab"
+            aria-selected={activeTab === tab}
+            onClick={() => setActiveTab(tab)}
+            className={`rounded-md border px-3 py-1.5 font-mono-nums text-[10px] uppercase tracking-widest transition-colors ${
+              activeTab === tab
+                ? "border-zinc-700 bg-zinc-900 text-zinc-200"
+                : "border-transparent text-zinc-600 hover:border-zinc-800 hover:text-zinc-400"
+            }`}
+          >
+            {tab}
+          </button>
+        ))}
+      </nav>
+
+      {activeTab === "live" && telemetryStreamPaused ? (
         <div
           className="border-b border-zinc-700/70 bg-zinc-900/40 px-5 py-2 text-center font-mono-nums text-[11px] leading-snug tracking-wide text-zinc-500"
           role="status"
@@ -542,8 +574,9 @@ export default function App() {
         </div>
       ) : null}
 
-      <main className="flex min-h-0 flex-1 gap-4 p-4">
-        <section className="flex min-h-0 min-w-0 w-[70%] flex-col">
+      {activeTab === "live" ? (
+      <main className="flex min-h-0 flex-1 p-4">
+        <section className="flex min-h-0 min-w-0 w-full flex-col">
           <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-transparent shadow-none">
             <CardHeader className="pb-2">
               <CardTitle className="text-xs font-medium uppercase tracking-widest text-zinc-500">
@@ -681,119 +714,50 @@ export default function App() {
                 </ResponsiveContainer>
               </div>
             </CardContent>
-          </Card>
-        </section>
-
-        <section className="flex w-[30%] min-w-[280px] flex-col border-l border-[var(--color-border)] pl-4">
-          <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-[var(--color-panel)] shadow-none">
-            <CardHeader
-              className={`border-b pb-2 transition-colors duration-300 ${
+            <div
+              className={`flex flex-wrap items-start justify-between gap-3 border-t px-4 py-3 transition-colors duration-300 ${
                 snapshotHighlighted
                   ? "border-amber-800/60 bg-amber-950/10"
-                  : "border-transparent"
+                  : "border-[var(--color-border)]"
               }`}
             >
-              <div className="flex items-center justify-between gap-2">
-                <CardTitle className="text-xs font-medium uppercase tracking-widest text-zinc-500">
+              <div className="min-w-0 flex-1">
+                <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-600">
                   Structural Drift Audit
-                </CardTitle>
-                <span className="font-mono-nums text-[10px] text-zinc-600">
-                  crit {criticalityRecentPct.toFixed(1)}%
-                </span>
-              </div>
-              {traceMeta ? (
-                <div className="mt-1 space-y-1 border-l border-zinc-700 pl-2">
-                  <p
-                    className="font-mono-nums text-[11px] leading-relaxed text-zinc-600"
-                    title={traceMeta.summary}
-                  >
-                    {traceMeta.summary}
-                  </p>
-                  <p
-                    className="line-clamp-3 font-mono-nums text-[11px] leading-relaxed text-zinc-600/90"
-                    title={traceMeta.explainability}
-                  >
-                    {traceMeta.explainability}
-                  </p>
-                </div>
-              ) : null}
-            </CardHeader>
-            <CardContent className="flex min-h-0 flex-1 flex-col p-0">
-              <ScrollArea className="min-h-0 flex-1 px-4 pb-4">
-                <div className="space-y-3 pr-2">
-                  {audits.length === 0 && (
-                    <p className="font-mono-nums text-xs text-zinc-600">No Gemini audits yet.</p>
-                  )}
-                  {audits.map((a) => {
-                    const g = a.report?.gemini
-                    const risk = g?.risk_score ?? "—"
-                    return (
-                      <div
-                        key={a.id}
-                        className="rounded-md border border-zinc-800 bg-zinc-950/40 p-3"
-                      >
-                        <div className="mb-2 flex items-center justify-between gap-2">
-                          <Badge
-                            variant={
-                              Number(risk) >= 60
-                                ? "destructive"
-                                : "default"
-                            }
-                            className="text-[10px]"
-                          >
-                            RISK {String(risk)}
-                          </Badge>
-                          <span className="font-mono-nums text-[10px] text-zinc-500">
-                            #{a.id}
-                          </span>
-                        </div>
-                        <p className="font-mono-nums text-xs leading-relaxed text-zinc-400">
-                          {g?.executive_summary ||
-                            g?.mitigation_strategy ||
-                            g?.cause ||
-                            "—"}
-                        </p>
-                      </div>
-                    )
-                  })}
-                </div>
-              </ScrollArea>
-              <div className="border-t border-[var(--color-border)] px-4 py-3">
-                <p className="mb-2 font-mono-nums text-[10px] uppercase tracking-wide text-zinc-600">
-                  Recent audit index
                 </p>
-                <Table>
-                  <TableHeader>
-                    <TableRow>
-                      <TableHead>ID</TableHead>
-                      <TableHead>Risk</TableHead>
-                      <TableHead>Model</TableHead>
-                    </TableRow>
-                  </TableHeader>
-                  <TableBody>
-                    {audits
-                      .slice(-8)
-                      .reverse()
-                      .map((a) => (
-                        <TableRow key={`t-${a.id}`}>
-                          <TableCell className="font-mono-nums text-xs">
-                            {a.id}
-                          </TableCell>
-                          <TableCell className="font-mono-nums text-xs">
-                            {String(a.report?.gemini?.risk_score ?? "—")}
-                          </TableCell>
-                          <TableCell className="max-w-[100px] truncate font-mono-nums text-xs text-zinc-500">
-                            {String(a.report?.model ?? "—")}
-                          </TableCell>
-                        </TableRow>
-                      ))}
-                  </TableBody>
-                </Table>
+                {traceBundle ? (
+                  <div className="mt-1 border-l border-zinc-700 pl-2">
+                    <p
+                      className="font-mono-nums text-[11px] leading-relaxed text-zinc-500"
+                      title={traceBundle.summary}
+                    >
+                      {traceBundle.summary}
+                    </p>
+                    <p
+                      className="line-clamp-1 font-mono-nums text-[10px] leading-relaxed text-zinc-600"
+                      title={traceBundle.explainability}
+                    >
+                      {traceBundle.explainability}
+                    </p>
+                  </div>
+                ) : null}
               </div>
-            </CardContent>
+              <span className="font-mono-nums text-[10px] text-zinc-600">
+                crit {criticalityRecentPct.toFixed(1)}%
+              </span>
+            </div>
           </Card>
         </section>
       </main>
+      ) : (
+        <IncidentsTab
+          trace={traceBundle}
+          audits={audits}
+          breachThreshold={mahalanobisBreachThreshold}
+          criticalityWindowEvents={criticalityWindowEvents}
+          criticalityAuditPct={criticalityAuditPct}
+        />
+      )}
     </div>
   )
 }
