@@ -18,11 +18,12 @@ from sentinel import DyopsSentinel
 
 
 def _drain_telemetry_queue() -> None:
-    while True:
-        try:
-            api._telemetry_queue.get_nowait()
-        except queue.Empty:
-            return
+    for telemetry_queue in (api._telemetry_queue, api._demo_telemetry_queue):
+        while True:
+            try:
+                telemetry_queue.get_nowait()
+            except queue.Empty:
+                break
 
 
 @pytest.fixture
@@ -34,6 +35,7 @@ def client(
 
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
+    monkeypatch.delenv("DYOPS_DEMO_INJECT", raising=False)
 
     @asynccontextmanager
     async def test_lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -160,3 +162,29 @@ def test_telemetry_websocket_receives_event_result(client: TestClient) -> None:
     assert payload["physical_price"] == 100.0
     assert payload["token_price"] == 99.0
     assert payload["session_event_index"] == 1
+
+
+def test_demo_injection_is_guarded_and_emits_breach(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    disabled = client.post(
+        "/api/demo/inject_scenario",
+        params={"name": "sudden_depeg"},
+    )
+    assert disabled.status_code == 404
+
+    monkeypatch.setenv("DYOPS_DEMO_INJECT", "1")
+    with client.websocket_connect("/ws/telemetry") as websocket:
+        response = client.post(
+            "/api/demo/inject_scenario",
+            params={"name": "sudden_depeg", "seed": 13},
+        )
+        assert response.status_code == 202
+
+        for _ in range(response.json()["ticks_queued"]):
+            message = websocket.receive_json()
+            if message["payload"]["level"] == "BREACH":
+                break
+        else:
+            pytest.fail("sudden_depeg injection did not emit a BREACH telemetry event")

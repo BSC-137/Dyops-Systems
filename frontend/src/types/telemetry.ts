@@ -47,6 +47,7 @@ export interface StatusResponse {
   criticality_window_events: number
   criticality_audit_pct: number
   audit_cooldown_ticks: number
+  demo_inject_enabled: boolean
 }
 
 /** GET /api/history/trace */

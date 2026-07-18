@@ -16,7 +16,7 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -28,6 +28,7 @@ if str(_DYOPS_PY) not in sys.path:
 import dyops_core  # noqa: E402
 from binance_feed import resolve_feed_mode, start_binance_feed_thread  # noqa: E402
 from database import PersistenceManager  # noqa: E402
+from scenarios import get_scenario  # noqa: E402
 from sentinel import (  # noqa: E402
     AUDIT_COOLDOWN_TICKS,
     AUDITS_DIR,
@@ -266,6 +267,7 @@ class ConnectionHub:
 hub = ConnectionHub()
 _stop_binance = threading.Event()
 _telemetry_queue: queue.Queue[tuple[float, float, float]] = queue.Queue()
+_demo_telemetry_queue: queue.Queue[tuple[float, float, float, float]] = queue.Queue()
 _binance_thread: threading.Thread | None = None
 _persistence: PersistenceManager | None = None
 _sentinel: DyopsSentinel | None = None
@@ -330,13 +332,24 @@ async def _telemetry_pump() -> None:
     global _last_tick_monotonic, _session_event_count
     assert _sentinel is not None
     while True:
+        is_demo = False
+        delay_after = 0.0
         try:
-            ts, phys, tok = _telemetry_queue.get_nowait()
+            ts, phys, tok, delay_after = _demo_telemetry_queue.get_nowait()
+            is_demo = True
         except queue.Empty:
-            await asyncio.sleep(0.01)
-            continue
+            try:
+                ts, phys, tok = _telemetry_queue.get_nowait()
+            except queue.Empty:
+                await asyncio.sleep(0.01)
+                continue
         try:
-            result = _sentinel.process_event(ts, phys, tok)
+            result = _sentinel.process_event(
+                ts,
+                phys,
+                tok,
+                schedule_background_audit=not is_demo,
+            )
         except Exception:  # noqa: BLE001
             await asyncio.sleep(0.001)
             continue
@@ -348,6 +361,8 @@ async def _telemetry_pump() -> None:
         model["token_price"] = tok
         model["session_event_index"] = _session_event_count
         await hub.broadcast_telemetry(model)
+        if delay_after > 0.0:
+            await asyncio.sleep(delay_after)
 
 
 async def _audit_poll_loop() -> None:
@@ -414,6 +429,7 @@ class StatusResponse(BaseModel):
     criticality_window_events: int
     criticality_audit_pct: float
     audit_cooldown_ticks: int
+    demo_inject_enabled: bool
 
 
 @app.get("/api/status", response_model=StatusResponse)
@@ -430,7 +446,33 @@ async def api_status() -> StatusResponse:
         criticality_window_events=int(CRITICALITY_WINDOW_EVENTS),
         criticality_audit_pct=float(CRITICALITY_AUDIT_PCT),
         audit_cooldown_ticks=int(AUDIT_COOLDOWN_TICKS),
+        demo_inject_enabled=os.environ.get("DYOPS_DEMO_INJECT") == "1",
     )
+
+
+@app.post("/api/demo/inject_scenario", status_code=202)
+async def inject_demo_scenario(
+    name: str = "sudden_depeg",
+    seed: int = 13,
+) -> dict[str, int | str]:
+    if os.environ.get("DYOPS_DEMO_INJECT") != "1":
+        raise HTTPException(status_code=404, detail="Not found")
+    if name != "sudden_depeg":
+        raise HTTPException(status_code=400, detail="Only sudden_depeg is available")
+    if not _demo_telemetry_queue.empty():
+        raise HTTPException(status_code=409, detail="A demo injection is already running")
+
+    scenario = get_scenario(name, seed=seed)
+    shock_tick = int(scenario.expected_outcomes.get("shock_tick", 0))
+    timestamp = time.time()
+    for i, (phys, tok) in enumerate(
+        zip(scenario.physical_price, scenario.token_price, strict=True)
+    ):
+        # Keep injected timestamps effectively current while pacing the visible stress phase.
+        ts = timestamp + i * 1e-6
+        delay_after = 0.04 if i >= shock_tick else 0.0
+        _demo_telemetry_queue.put((ts, float(phys), float(tok), delay_after))
+    return {"scenario": name, "seed": seed, "ticks_queued": len(scenario.timestamps)}
 
 
 class HistoryPoint(BaseModel):

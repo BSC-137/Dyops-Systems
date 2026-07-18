@@ -140,6 +140,8 @@ export default function App() {
   const [criticalityWindowEvents, setCriticalityWindowEvents] = useState(0)
   const [criticalityAuditPct, setCriticalityAuditPct] = useState(0)
   const [auditCooldownTicks, setAuditCooldownTicks] = useState(0)
+  const [demoInjectEnabled, setDemoInjectEnabled] = useState(false)
+  const [demoInjectRunning, setDemoInjectRunning] = useState(false)
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceMeta, setTraceMeta] = useState<Pick<
     HistoryTraceBundle,
@@ -151,6 +153,7 @@ export default function App() {
   const auditsRef = useRef<Map<number, AuditRow>>(new Map())
   const snapshotHighlightTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null)
+  const demoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mergeChart = useCallback((point: ChartPoint) => {
     chartDataRef.current = [...chartDataRef.current, point].slice(-MAX_POINTS)
@@ -334,6 +337,7 @@ export default function App() {
           setCriticalityWindowEvents(s.criticality_window_events)
           setCriticalityAuditPct(s.criticality_audit_pct)
           setAuditCooldownTicks(s.audit_cooldown_ticks)
+          setDemoInjectEnabled(s.demo_inject_enabled)
         }
       } catch {
         /* ignore */
@@ -343,6 +347,32 @@ export default function App() {
     const t = setInterval(tick, 2000)
     return () => clearInterval(t)
   }, [])
+
+  const injectSuddenDepeg = useCallback(async () => {
+    setDemoInjectRunning(true)
+    try {
+      const response = await fetch(
+        "/api/demo/inject_scenario?name=sudden_depeg",
+        { method: "POST" },
+      )
+      if (!response.ok) throw new Error(String(response.status))
+      demoResetTimerRef.current = setTimeout(() => {
+        setDemoInjectRunning(false)
+        demoResetTimerRef.current = null
+      }, 7000)
+    } catch {
+      setDemoInjectRunning(false)
+    }
+  }, [])
+
+  useEffect(
+    () => () => {
+      if (demoResetTimerRef.current !== null) {
+        clearTimeout(demoResetTimerRef.current)
+      }
+    },
+    [],
+  )
 
   const chartScaled = useMemo(() => {
     const visible =
@@ -428,6 +458,18 @@ export default function App() {
             <FlaskConical className="mr-1 size-3 opacity-70" aria-hidden />
             Methodology
           </Badge>
+          {demoInjectEnabled ? (
+            <button
+              type="button"
+              disabled={demoInjectRunning}
+              onClick={injectSuddenDepeg}
+              className="w-fit rounded-md border border-amber-900/70 bg-amber-950/20 px-2 py-1 font-mono-nums text-[10px] text-amber-300/80 transition-colors hover:border-amber-800 hover:text-amber-200 disabled:cursor-wait disabled:border-zinc-800 disabled:text-zinc-600"
+            >
+              {demoInjectRunning
+                ? "Demo: sudden depeg running…"
+                : "Demo: inject sudden depeg"}
+            </button>
+          ) : null}
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-4">
