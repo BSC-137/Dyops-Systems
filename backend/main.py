@@ -20,6 +20,8 @@ from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
+from backend import webhooks
+
 # dyops_core package (sentinel, database, binance_feed) lives alongside this repo folder
 _DYOPS_PY = Path(__file__).resolve().parent.parent / "dyops_core"
 if str(_DYOPS_PY) not in sys.path:
@@ -273,6 +275,7 @@ _persistence: PersistenceManager | None = None
 _sentinel: DyopsSentinel | None = None
 _session_event_count: int = 0
 _last_tick_monotonic: float = 0.0
+_webhook_tasks: set[asyncio.Task[None]] = set()
 
 
 def _replay_observer_state(persistence: PersistenceManager) -> dyops_core.BasisObserver:
@@ -328,6 +331,52 @@ def _on_shutdown_sync() -> None:
     _binance_thread = None
 
 
+async def _send_escalation_webhook(
+    model: dict[str, Any],
+    *,
+    session_event_count: int,
+) -> None:
+    total = session_event_count
+    if _persistence is not None:
+        try:
+            total = await asyncio.to_thread(_persistence.count_events)
+        except Exception:  # noqa: BLE001
+            pass
+    summary, explainability = _pulse_narrative(
+        live=True,
+        age_sec=0.0,
+        session=session_event_count,
+        total=total,
+    )
+    health = model["health"]
+    payload: dict[str, Any] = {
+        "timestamp": model["timestamp"],
+        "level": model["level"],
+        "mahalanobis": health["mahalanobis_distance"],
+        "innovation": health["innovation"],
+        "criticality_recent_pct": model["criticality_recent_pct"],
+        "instrument_id": os.environ.get("DYOPS_INSTRUMENT_ID", "default"),
+        "summary": summary,
+        "explainability": explainability,
+    }
+    if model.get("event_id") is not None:
+        payload["event_id"] = model["event_id"]
+    await webhooks.send_webhooks(payload)
+
+
+def _schedule_escalation_webhook(model: dict[str, Any]) -> None:
+    if not webhooks.configured_urls():
+        return
+    task = asyncio.create_task(
+        _send_escalation_webhook(
+            model,
+            session_event_count=_session_event_count,
+        )
+    )
+    _webhook_tasks.add(task)
+    task.add_done_callback(_webhook_tasks.discard)
+
+
 async def _telemetry_pump() -> None:
     global _last_tick_monotonic, _session_event_count
     assert _sentinel is not None
@@ -360,6 +409,8 @@ async def _telemetry_pump() -> None:
         model["physical_price"] = phys
         model["token_price"] = tok
         model["session_event_index"] = _session_event_count
+        if result.level.name == "BREACH" or result.snapshot is not None:
+            _schedule_escalation_webhook(model)
         await hub.broadcast_telemetry(model)
         if delay_after > 0.0:
             await asyncio.sleep(delay_after)
@@ -421,6 +472,7 @@ app.add_middleware(
 
 class StatusResponse(BaseModel):
     gemini_configured: bool
+    webhook_configured: bool
     binance_feed: str
     audits_dir: str
     db_path: str
@@ -438,6 +490,7 @@ async def api_status() -> StatusResponse:
     gem = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     return StatusResponse(
         gemini_configured=gem,
+        webhook_configured=bool(webhooks.configured_urls()),
         binance_feed=resolve_feed_mode(),
         audits_dir=str(AUDITS_DIR.resolve()),
         db_path=str(_persistence.db_path.resolve()),

@@ -1,17 +1,21 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import queue
+import threading
 import time
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager
 from pathlib import Path
 
 import pytest
+import httpx
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from backend import main as api
+from backend import webhooks
 import sentinel
 from database import PersistenceManager
 from sentinel import DyopsSentinel
@@ -36,6 +40,8 @@ def client(
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("DYOPS_DEMO_INJECT", raising=False)
+    monkeypatch.delenv("DYOPS_WEBHOOK_URLS", raising=False)
+    monkeypatch.delenv("DYOPS_INSTRUMENT_ID", raising=False)
 
     @asynccontextmanager
     async def test_lifespan(_: FastAPI) -> AsyncIterator[None]:
@@ -97,6 +103,58 @@ def test_status_uses_sentinel_breach_threshold(client: TestClient) -> None:
         response.json()["mahalanobis_breach_threshold"]
         == sentinel.MAHALANOBIS_BREACH
     )
+
+
+def test_breach_sends_webhook_but_monitoring_does_not(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests: list[httpx.Request] = []
+    webhook_received = threading.Event()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(request)
+        webhook_received.set()
+        return httpx.Response(204)
+
+    real_async_client = httpx.AsyncClient
+
+    def mock_async_client(**kwargs: object) -> httpx.AsyncClient:
+        kwargs["transport"] = httpx.MockTransport(handler)
+        return real_async_client(**kwargs)
+
+    monkeypatch.setattr(webhooks.httpx, "AsyncClient", mock_async_client)
+    monkeypatch.setenv("DYOPS_WEBHOOK_URLS", "https://partner.example/webhooks/dyops")
+    monkeypatch.setenv("DYOPS_INSTRUMENT_ID", "usdc-usdt")
+
+    status = client.get("/api/status")
+    assert status.json()["webhook_configured"] is True
+
+    api._telemetry_queue.put((0.0, 100.0, 100.0))
+    _wait_for_persisted_events(client, 1)
+    time.sleep(0.05)
+    assert requests == []
+
+    prices = [(float(tick), 100.0, 100.0) for tick in range(1, 31)]
+    prices.append((31.0, 100.0, 90.0))
+    for tick in prices:
+        api._telemetry_queue.put(tick)
+    _wait_for_persisted_events(client, 1 + len(prices))
+    assert webhook_received.wait(timeout=1.0)
+
+    assert len(requests) == 1
+    payload = json.loads(requests[0].content)
+    assert payload["level"] == "BREACH"
+    assert payload["mahalanobis"] > sentinel.MAHALANOBIS_BREACH
+    assert payload["instrument_id"] == "usdc-usdt"
+    assert {
+        "timestamp",
+        "innovation",
+        "criticality_recent_pct",
+        "summary",
+        "explainability",
+    } <= payload.keys()
+    assert "event_id" not in payload
 
 
 def test_history_trace_has_deterministic_breach_reasoning(

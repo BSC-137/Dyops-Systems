@@ -320,6 +320,8 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 | `DYOPS_SQLITE_PATH` | Override SQLite file path (default next to `database.py` in `dyops_core/`) |
 | `DYOPS_BINANCE_FEED` | `stable` (default) vs LST aliases (`lst`, `steth`, …) |
 | `DYOPS_CORS_ORIGINS` | Comma-separated origins for FastAPI CORS (default includes Vite dev server) |
+| `DYOPS_WEBHOOK_URLS` | Optional comma-separated partner webhook URLs |
+| `DYOPS_INSTRUMENT_ID` | Instrument label included in webhook payloads (default `default`) |
 
 ---
 
@@ -410,7 +412,7 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 | Method / path | Role |
 |---------------|------|
-| `GET /api/status` | `gemini_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
+| `GET /api/status` | `gemini_configured`, `webhook_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
 | `GET /api/pulse` | **`PulseResponse`**: `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, **`summary`**, **`explainability`** |
 | `GET /api/history?limit=` | **`HistoryPoint[]`**: `t`, `measured_basis`, `filtered_basis`, `innovation`, `mahalanobis`, `valid` |
 | `GET /api/history/trace?limit=` | **`HistoryTraceBundle`**: `summary`, `explainability`, **`points`** (`HistoryTracePoint` = history fields + **`reasoning`**) |
@@ -418,6 +420,16 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 | `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
 
 **Compatibility note:** Integrations that expect a **raw array** from `/api/history` remain valid. Use **`/api/history/trace`** when you need **operator copy** or **per-tick reasoning** without touching Gemini.
+
+---
+
+### Integration
+
+Set **`DYOPS_WEBHOOK_URLS`** to one or more comma-separated HTTPS webhook URLs. Dyops sends a JSON `POST` for every **BREACH** and for each cooldown-gated **AUDIT snapshot** (the first snapshot is immediate). Delivery runs outside the telemetry pump, has a 2-second HTTP timeout, and retries once on HTTP or network failure.
+
+The payload contains `timestamp`, `level`, `mahalanobis`, `innovation`, `criticality_recent_pct`, `instrument_id`, and the pulse `summary` and `explainability` fields. It also contains `event_id` when an ID is already available; asynchronous SQLite writes mean it is normally omitted from live escalation payloads.
+
+This integration uses plain HTTP webhooks through `httpx`; it does not require a Slack or partner-specific SDK. **`GET /api/status`** reports `webhook_configured: true` whenever at least one non-empty URL is configured.
 
 ---
 
@@ -512,7 +524,6 @@ Partner evidence pack: [`reports/robustness_report.md`](reports/robustness_repor
 Everything below is **roadmap**, not shipped in-repo unless separately noted:
 
 - **Multi-tenant auth / per-tenant API keys** — partition access and metering for partner deployments.
-- **Outbound webhooks** — Slack / PagerDuty-style notifications on breach or audit escalation (payload mirroring sentinel events).
 - **Hosted vs BYO** — clarify packaging: customer VPC / single-tenant SaaS versus self-hosted bundle (Docker Compose / Helm TBD).
 
 ---
