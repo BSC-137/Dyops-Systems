@@ -1,0 +1,40 @@
+FROM python:3.12-slim-bookworm AS builder
+
+ENV CARGO_HOME=/usr/local/cargo \
+    RUSTUP_HOME=/usr/local/rustup \
+    PATH=/usr/local/cargo/bin:$PATH
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends build-essential curl \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --profile minimal --default-toolchain stable \
+    && pip install --no-cache-dir "maturin>=1.5,<2" \
+    && rm -rf /var/lib/apt/lists/*
+
+WORKDIR /build/dyops_core
+COPY dyops_core/Cargo.toml dyops_core/Cargo.lock dyops_core/pyproject.toml ./
+COPY dyops_core/src ./src
+RUN maturin build --release --out /wheels
+
+
+FROM python:3.12-slim-bookworm AS runtime
+
+ENV PYTHONDONTWRITEBYTECODE=1 \
+    PYTHONUNBUFFERED=1 \
+    DYOPS_SQLITE_PATH=/data/dyops_ts.db
+
+WORKDIR /app
+COPY backend/requirements.txt /app/backend/requirements.txt
+COPY --from=builder /wheels /wheels
+RUN pip install --no-cache-dir --no-deps /wheels/*.whl \
+    && pip install --no-cache-dir -r /app/backend/requirements.txt \
+       "numpy>=1.26" "loguru>=0.7" "google-genai>=1.0" "websockets>=13.0" \
+    && rm -rf /wheels
+
+COPY backend /app/backend
+COPY dyops_core/*.py /app/dyops_core/
+COPY dyops_core/scenarios /app/dyops_core/scenarios
+RUN mkdir -p /data
+
+EXPOSE 8000
+CMD ["uvicorn", "backend.main:app", "--host", "0.0.0.0", "--port", "8000"]

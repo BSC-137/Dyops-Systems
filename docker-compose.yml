@@ -1,0 +1,40 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile.api
+    environment:
+      DYOPS_BINANCE_FEED: ${DYOPS_BINANCE_FEED:-stable}
+      DYOPS_DEMO_INJECT: ${DYOPS_DEMO_INJECT:-1}
+      DYOPS_WEBHOOK_URLS: ${DYOPS_WEBHOOK_URLS:-}
+      DYOPS_CORS_ORIGINS: ${DYOPS_CORS_ORIGINS:-http://localhost:8080}
+      DYOPS_SQLITE_PATH: /data/dyops_ts.db
+    ports:
+      - "8000:8000"
+    volumes:
+      - dyops-data:/data
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/status', timeout=2)"
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.frontend
+    depends_on:
+      api:
+        condition: service_healthy
+    ports:
+      - "8080:80"
+    restart: unless-stopped
+
+volumes:
+  dyops-data:

@@ -324,11 +324,31 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 | `DYOPS_INSTRUMENT_LABEL` | Optional label for the backward-compatible single feed |
 | `DYOPS_CORS_ORIGINS` | Comma-separated origins for FastAPI CORS (default includes Vite dev server) |
 | `DYOPS_WEBHOOK_URLS` | Optional comma-separated partner webhook URLs |
-| `DYOPS_INSTRUMENT_ID` | Instrument label included in webhook payloads (default `default`) |
 
 ---
 
-### Prerequisites
+### Partner cold start — Docker (primary)
+
+The supported partner demo path builds the Rust extension in release mode, runs the FastAPI service, and serves the production React bundle through nginx:
+
+```bash
+cp .env.example .env
+./scripts/demo.sh
+```
+
+Open:
+
+- UI: **`http://localhost:8080`**
+- API docs: **`http://localhost:8000/docs`**
+- Status: **`http://localhost:8000/api/status`**
+
+The nginx container proxies same-origin `/api/*` and WebSocket `/ws/*` traffic to the API container. SQLite data persists in the `dyops-data` Docker volume. Stop the stack with `docker compose down`; add `-v` only when you intentionally want to delete persisted demo data.
+
+Requirements: Docker Engine with the Compose plugin. Edit `.env` before startup to change the feed, demo injection, partner webhooks, or allowed origins.
+
+---
+
+### Local development prerequisites (secondary)
 
 - **Rust** (stable) and **Cargo** (for `maturin`)
 - **Python** 3.10+
@@ -336,7 +356,7 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 ---
 
-### Installation and build
+### Local installation and build (secondary)
 
 #### 1. Python environment and native extension
 
@@ -370,9 +390,9 @@ npm install
 
 ---
 
-### How to run
+### Local development run (secondary)
 
-#### Recommended: FastAPI + React
+#### FastAPI + React
 
 **Terminal A** — API (from repo root, venv activated):
 
