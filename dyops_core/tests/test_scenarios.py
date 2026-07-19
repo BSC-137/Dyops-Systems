@@ -45,6 +45,7 @@ class ScenarioRunnerTests(unittest.TestCase):
         payload = json.loads(result.to_json())
 
         self.assertEqual(payload["scenario"], "stale_feed")
+        self.assertEqual(payload["instrument_id"], "default")
         self.assertEqual(len(payload["ticks"]), result.metrics.total_ticks)
         self.assertEqual(result.metrics.invalid_ticks, 6)
         self.assertTrue(
@@ -60,6 +61,16 @@ class ScenarioRunnerTests(unittest.TestCase):
                 for value in tick.values()
             )
         )
+
+    def test_runner_accepts_instrument_id_override(self) -> None:
+        from scenarios.runner import run_scenario
+
+        result = run_scenario(
+            get_scenario("stable_tracking"),
+            instrument_id="stable",
+        )
+
+        self.assertEqual(result.instrument_id, "stable")
 
     def test_recovery_scenario_returns_to_monitoring(self) -> None:
         from scenarios.runner import run_scenario

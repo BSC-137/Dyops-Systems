@@ -20,7 +20,7 @@ The measurement, escalation, and validation boundaries are documented in
 
 ## What Dyops does
 
-- **Ingests** paired market prices over **Binance WebSockets** (configurable **`stable`** vs LST-style feeds via `DYOPS_BINANCE_FEED`).
+- **Ingests** named paired instruments over concurrent **Binance WebSockets**, with one observer/sentinel state per instrument.
 - **Filters** log-basis with a **`BasisObserver`** implemented in **Rust** (PyO3), exposed to Python — Kalman-style updates with **`filtered_basis`**, **`innovation`**, **`mahalanobis_distance`**, **`measurement_valid`**.
 - **Policies** (`DyopsSentinel`): breach when Mahalanobis exceeds **`MAHALANOBIS_BREACH`** (default `3.0`); **AUDIT** when rolling **criticality** over a finite window crosses a configurable threshold.
 - **Persists** ticks and audits to **SQLite** through a background writer (**`PersistenceManager`**).
@@ -319,6 +319,9 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 | `DYOPS_GEMINI_MODEL` | Gemini model id (default `gemini-3-flash`) |
 | `DYOPS_SQLITE_PATH` | Override SQLite file path (default next to `database.py` in `dyops_core/`) |
 | `DYOPS_BINANCE_FEED` | `stable` (default) vs LST aliases (`lst`, `steth`, …) |
+| `DYOPS_INSTRUMENTS` | Registry as presets (`stable,lst`) or a JSON array of ids, labels, feed modes, symbols, and synthetic flags |
+| `DYOPS_INSTRUMENT_ID` | Backward-compatible single-feed id when `DYOPS_INSTRUMENTS` is unset (default `default`) |
+| `DYOPS_INSTRUMENT_LABEL` | Optional label for the backward-compatible single feed |
 | `DYOPS_CORS_ORIGINS` | Comma-separated origins for FastAPI CORS (default includes Vite dev server) |
 | `DYOPS_WEBHOOK_URLS` | Optional comma-separated partner webhook URLs |
 | `DYOPS_INSTRUMENT_ID` | Instrument label included in webhook payloads (default `default`) |
@@ -412,11 +415,12 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 | Method / path | Role |
 |---------------|------|
+| `GET /api/instruments` | Instrument ids, labels, feed/symbol metadata, pulse state, and scoped event counts |
 | `GET /api/status` | `gemini_configured`, `webhook_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
-| `GET /api/pulse` | **`PulseResponse`**: `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, **`summary`**, **`explainability`** |
-| `GET /api/history?limit=` | **`HistoryPoint[]`**: `t`, `measured_basis`, `filtered_basis`, `innovation`, `mahalanobis`, `valid` |
-| `GET /api/history/trace?limit=` | **`HistoryTraceBundle`**: `summary`, `explainability`, **`points`** (`HistoryTracePoint` = history fields + **`reasoning`**) |
-| `WebSocket /ws/telemetry` | Live `EventResult`-shaped payloads per tick |
+| `GET /api/pulse?instrument=` | Instrument-scoped freshness, counts, `summary`, and `explainability` |
+| `GET /api/history?instrument=&limit=` | Instrument-scoped bare **`HistoryPoint[]`**, including `instrument_id` |
+| `GET /api/history/trace?instrument=&limit=` | Instrument-scoped trace bundle with deterministic per-tick `reasoning` |
+| `WebSocket /ws/telemetry` | Shared live stream; every payload includes `instrument_id` for client filtering |
 | `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
 
 **Compatibility note:** Integrations that expect a **raw array** from `/api/history` remain valid. Use **`/api/history/trace`** when you need **operator copy** or **per-tick reasoning** without touching Gemini.
@@ -424,6 +428,14 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 ---
 
 ### Integration
+
+Run both built-in feeds concurrently:
+
+```bash
+DYOPS_INSTRUMENTS=stable,lst uvicorn backend.main:app --host 0.0.0.0 --port 8000
+```
+
+For custom names and metadata, use a JSON array, for example `DYOPS_INSTRUMENTS='[{"id":"usdc-usdt","label":"USDC / USDT","feed_mode":"stable","physical_symbol":"USD","token_symbol":"USDCUSDT","synthetic":true},{"id":"eth-steth","label":"ETH / stETH","feed_mode":"lst","physical_symbol":"ETHUSDT","token_symbol":"STETHUSDT"}]'`. Thresholds remain global; observer state, SQLite history, pulse, and escalation routing are partitioned by instrument.
 
 Set **`DYOPS_WEBHOOK_URLS`** to one or more comma-separated HTTPS webhook URLs. Dyops sends a JSON `POST` for every **BREACH** and for each cooldown-gated **AUDIT snapshot** (the first snapshot is immediate). Delivery runs outside the telemetry pump, has a 2-second HTTP timeout, and retries once on HTTP or network failure.
 

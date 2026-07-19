@@ -19,6 +19,11 @@ def _parser() -> argparse.ArgumentParser:
     )
     selection.add_argument("--all", action="store_true", help="run the entire catalog")
     parser.add_argument("--seed", type=int, help="override the deterministic random seed")
+    parser.add_argument(
+        "--instrument-id",
+        default="default",
+        help="instrument metadata attached to scenario results (default: default)",
+    )
     output = parser.add_mutually_exclusive_group()
     output.add_argument("--json", action="store_true", help="emit the full result as JSON")
     output.add_argument(
@@ -130,10 +135,15 @@ def main(argv: list[str] | None = None) -> int:
     from .runner import run_scenario
 
     names = list_scenarios() if args.all else [args.scenario]
-    results = [
-        run_scenario(get_scenario(name, seed=args.seed))
-        for name in names
-    ]
+    results = []
+    for name in names:
+        scenario = get_scenario(name, seed=args.seed)
+        if args.instrument_id == "default":
+            results.append(run_scenario(scenario))
+        else:
+            results.append(
+                run_scenario(scenario, instrument_id=args.instrument_id)
+            )
     all_passed = all(result.passed for result in results)
 
     if args.json:

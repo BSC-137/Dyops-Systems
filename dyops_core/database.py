@@ -31,7 +31,7 @@ class PersistenceManager:
         self._stop = threading.Event()
         self._ready = threading.Event()
         self._latest_event_id_lock = threading.Lock()
-        self._latest_event_id: int = 0
+        self._latest_event_ids: dict[str, int] = {}
         self._thread = threading.Thread(target=self._writer_loop, name="dyops-sqlite", daemon=True)
         self._thread.start()
         self._ready.wait(timeout=5.0)
@@ -51,22 +51,46 @@ class PersistenceManager:
             """
             CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_id TEXT NOT NULL DEFAULT 'default',
                 timestamp REAL NOT NULL,
                 physical_price REAL NOT NULL,
                 token_price REAL NOT NULL,
                 innovation REAL,
                 mahalanobis_distance REAL
             );
-            CREATE INDEX IF NOT EXISTS idx_events_ts ON events (timestamp DESC);
 
             CREATE TABLE IF NOT EXISTS audits (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
+                instrument_id TEXT NOT NULL DEFAULT 'default',
                 timestamp REAL NOT NULL,
                 event_id INTEGER,
                 report_json TEXT NOT NULL,
                 FOREIGN KEY (event_id) REFERENCES events (id)
             );
+            """
+        )
+        event_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(events)").fetchall()
+        }
+        if "instrument_id" not in event_columns:
+            conn.execute(
+                "ALTER TABLE events ADD COLUMN instrument_id TEXT NOT NULL DEFAULT 'default'"
+            )
+        audit_columns = {
+            str(row[1]) for row in conn.execute("PRAGMA table_info(audits)").fetchall()
+        }
+        if "instrument_id" not in audit_columns:
+            conn.execute(
+                "ALTER TABLE audits ADD COLUMN instrument_id TEXT NOT NULL DEFAULT 'default'"
+            )
+        conn.executescript(
+            """
+            CREATE INDEX IF NOT EXISTS idx_events_ts ON events (timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_events_instrument
+            ON events (instrument_id, id DESC);
             CREATE INDEX IF NOT EXISTS idx_audits_ts ON audits (timestamp DESC);
+            CREATE INDEX IF NOT EXISTS idx_audits_instrument
+            ON audits (instrument_id, id DESC);
             """
         )
         conn.commit()
@@ -91,10 +115,12 @@ class PersistenceManager:
                     cur = conn.execute(
                         """
                         INSERT INTO events
-                        (timestamp, physical_price, token_price, innovation, mahalanobis_distance)
-                        VALUES (?, ?, ?, ?, ?)
+                        (instrument_id, timestamp, physical_price, token_price, innovation,
+                         mahalanobis_distance)
+                        VALUES (?, ?, ?, ?, ?, ?)
                         """,
                         (
+                            payload["instrument_id"],
                             float(payload["timestamp"]),
                             float(payload["physical_price"]),
                             float(payload["token_price"]),
@@ -104,22 +130,23 @@ class PersistenceManager:
                     )
                     eid = int(cur.lastrowid)
                     with self._latest_event_id_lock:
-                        self._latest_event_id = eid
+                        self._latest_event_ids[payload["instrument_id"]] = eid
                 elif kind == "audit":
                     ts = float(payload.get("timestamp") or time.time())
+                    instrument_id = str(payload.get("instrument_id") or "default")
                     report = payload["report_json"]
                     if not isinstance(report, str):
                         report = json.dumps(report, allow_nan=False)
                     eid = payload.get("event_id")
                     if eid is None:
                         with self._latest_event_id_lock:
-                            eid = self._latest_event_id
+                            eid = self._latest_event_ids.get(instrument_id)
                     conn.execute(
                         """
-                        INSERT INTO audits (timestamp, event_id, report_json)
-                        VALUES (?, ?, ?)
+                        INSERT INTO audits (instrument_id, timestamp, event_id, report_json)
+                        VALUES (?, ?, ?, ?)
                         """,
-                        (ts, eid, report),
+                        (instrument_id, ts, eid, report),
                     )
                 conn.commit()
             except Exception as exc:  # noqa: BLE001
@@ -136,6 +163,7 @@ class PersistenceManager:
         physical_price: float,
         token_price: float,
         *,
+        instrument_id: str = "default",
         innovation: float | None,
         mahalanobis_distance: float | None,
     ) -> None:
@@ -143,6 +171,7 @@ class PersistenceManager:
             (
                 "event",
                 {
+                    "instrument_id": instrument_id,
                     "timestamp": timestamp,
                     "physical_price": physical_price,
                     "token_price": token_price,
@@ -158,11 +187,13 @@ class PersistenceManager:
         *,
         timestamp: float | None = None,
         event_id: int | None = None,
+        instrument_id: str = "default",
     ) -> None:
         self._q.put(
             (
                 "audit",
                 {
+                    "instrument_id": instrument_id,
                     "timestamp": timestamp,
                     "report_json": report_json,
                     "event_id": event_id,
@@ -170,63 +201,101 @@ class PersistenceManager:
             )
         )
 
-    def load_recent_events(self, limit: int = 500) -> list[dict[str, Any]]:
+    def load_recent_events(
+        self,
+        limit: int = 500,
+        *,
+        instrument_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Return up to ``limit`` most recent rows, oldest-first (for Kalman replay)."""
         conn = self._connect()
         try:
             self._init_schema(conn)
-            cur = conn.execute(
-                """
-                SELECT timestamp, physical_price, token_price, innovation, mahalanobis_distance
-                FROM events
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            if instrument_id is None:
+                cur = conn.execute(
+                    """
+                    SELECT instrument_id, timestamp, physical_price, token_price, innovation,
+                           mahalanobis_distance
+                    FROM events
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT instrument_id, timestamp, physical_price, token_price, innovation,
+                           mahalanobis_distance
+                    FROM events
+                    WHERE instrument_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (instrument_id, limit),
+                )
             rows = cur.fetchall()
         finally:
             conn.close()
         rows.reverse()
         return [
             {
-                "timestamp": r[0],
-                "physical_price": r[1],
-                "token_price": r[2],
-                "innovation": r[3],
-                "mahalanobis_distance": r[4],
+                "instrument_id": r[0],
+                "timestamp": r[1],
+                "physical_price": r[2],
+                "token_price": r[3],
+                "innovation": r[4],
+                "mahalanobis_distance": r[5],
             }
             for r in rows
         ]
 
-    def load_recent_audits(self, limit: int = 50) -> list[dict[str, Any]]:
+    def load_recent_audits(
+        self,
+        limit: int = 50,
+        *,
+        instrument_id: str | None = None,
+    ) -> list[dict[str, Any]]:
         """Most recent audit rows, newest-first (``report`` is parsed JSON)."""
         conn = self._connect()
         try:
             self._init_schema(conn)
-            cur = conn.execute(
-                """
-                SELECT id, timestamp, event_id, report_json
-                FROM audits
-                ORDER BY id DESC
-                LIMIT ?
-                """,
-                (limit,),
-            )
+            if instrument_id is None:
+                cur = conn.execute(
+                    """
+                    SELECT id, instrument_id, timestamp, event_id, report_json
+                    FROM audits
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (limit,),
+                )
+            else:
+                cur = conn.execute(
+                    """
+                    SELECT id, instrument_id, timestamp, event_id, report_json
+                    FROM audits
+                    WHERE instrument_id = ?
+                    ORDER BY id DESC
+                    LIMIT ?
+                    """,
+                    (instrument_id, limit),
+                )
             rows = cur.fetchall()
         finally:
             conn.close()
         out: list[dict[str, Any]] = []
         for r in rows:
             try:
-                report = json.loads(r[3]) if isinstance(r[3], str) else r[3]
+                report = json.loads(r[4]) if isinstance(r[4], str) else r[4]
             except json.JSONDecodeError:
-                report = {"raw": r[3]}
+                report = {"raw": r[4]}
             out.append(
                 {
                     "id": int(r[0]),
-                    "timestamp": float(r[1]),
-                    "event_id": r[2],
+                    "instrument_id": r[1],
+                    "timestamp": float(r[2]),
+                    "event_id": r[3],
                     "report": report,
                 }
             )
@@ -239,7 +308,7 @@ class PersistenceManager:
             self._init_schema(conn)
             cur = conn.execute(
                 """
-                SELECT id, timestamp, event_id, report_json
+                SELECT id, instrument_id, timestamp, event_id, report_json
                 FROM audits
                 WHERE id > ?
                 ORDER BY id ASC
@@ -253,24 +322,31 @@ class PersistenceManager:
         out: list[dict[str, Any]] = []
         for r in rows:
             try:
-                report = json.loads(r[3]) if isinstance(r[3], str) else r[3]
+                report = json.loads(r[4]) if isinstance(r[4], str) else r[4]
             except json.JSONDecodeError:
-                report = {"raw": r[3]}
+                report = {"raw": r[4]}
             out.append(
                 {
                     "id": int(r[0]),
-                    "timestamp": float(r[1]),
-                    "event_id": r[2],
+                    "instrument_id": r[1],
+                    "timestamp": float(r[2]),
+                    "event_id": r[3],
                     "report": report,
                 }
             )
         return out
 
-    def count_events(self) -> int:
+    def count_events(self, instrument_id: str | None = None) -> int:
         conn = self._connect()
         try:
             self._init_schema(conn)
-            cur = conn.execute("SELECT COUNT(*) FROM events")
+            if instrument_id is None:
+                cur = conn.execute("SELECT COUNT(*) FROM events")
+            else:
+                cur = conn.execute(
+                    "SELECT COUNT(*) FROM events WHERE instrument_id = ?",
+                    (instrument_id,),
+                )
             row = cur.fetchone()
             return int(row[0]) if row else 0
         finally:

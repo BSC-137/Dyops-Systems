@@ -85,6 +85,7 @@ class DyopsSentinel:
         audits_path: Path | str = AUDITS_DIR,
         on_audit: Optional[Callable[[dict[str, Any]], None]] = None,
         persistence: Optional[PersistenceManager] = None,
+        instrument_id: str = "default",
     ) -> None:
         self._core = dyops_core.DyopsSentinelCore(
             observer,
@@ -100,6 +101,7 @@ class DyopsSentinel:
         self.audits_path = Path(audits_path)
         self.on_audit = on_audit
         self.persistence = persistence
+        self.instrument_id = instrument_id
 
     def _maybe_schedule_audit(self, snapshot: dict[str, Any]) -> None:
         """Fire-and-forget audit when a running asyncio loop exists (sync `process_event`)."""
@@ -164,6 +166,7 @@ class DyopsSentinel:
                     "schema_version": 1,
                     "reason": "criticality_window",
                     "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+                    "instrument_id": self.instrument_id,
                 }
             )
             logger.warning(
@@ -190,6 +193,7 @@ class DyopsSentinel:
                 timestamp,
                 physical_price,
                 token_price,
+                instrument_id=self.instrument_id,
                 innovation=_json_safe_float(health.innovation),
                 mahalanobis_distance=_json_safe_float(health.mahalanobis_distance),
             )
@@ -342,6 +346,7 @@ class AgenticAuditor:
             self.persistence.schedule_audit(
                 record,
                 timestamp=datetime.now(timezone.utc).timestamp(),
+                instrument_id=str(snapshot.get("instrument_id") or "default"),
             )
 
         def _write() -> Path:

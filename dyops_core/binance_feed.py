@@ -14,6 +14,7 @@ import queue
 import random
 import threading
 import time
+from collections.abc import Iterable
 from typing import Literal
 
 import websockets
@@ -55,11 +56,13 @@ def _unwrap_message(text: str) -> list[dict]:
 
 
 async def _consume_stable(
-    out_q: "queue.Queue[tuple[float, float, float]]",
+    out_q: "queue.Queue",
     stop: threading.Event,
+    instrument_id: str | None = None,
+    token_symbol: str = "USDCUSDT",
 ) -> None:
     """USDC/USDT stablecoin basis: physical peg = 1.0 USDT notionally, token = USDC in USDT."""
-    uri = BINANCE_WS_SINGLE.format("usdcusdt@trade")
+    uri = BINANCE_WS_SINGLE.format(f"{token_symbol.lower()}@trade")
     backoff = BACKOFF_INITIAL
     while not stop.is_set():
         try:
@@ -83,7 +86,10 @@ async def _consume_stable(
                         ts_wall, price = parsed
                         if not math.isfinite(price) or price <= 0:
                             continue
-                        out_q.put((time.time(), 1.0, price))
+                        tick = (time.time(), 1.0, price)
+                        out_q.put(
+                            (instrument_id, *tick) if instrument_id is not None else tick
+                        )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -100,11 +106,14 @@ async def _consume_stable(
 
 
 async def _consume_lst(
-    out_q: "queue.Queue[tuple[float, float, float]]",
+    out_q: "queue.Queue",
     stop: threading.Event,
+    instrument_id: str | None = None,
+    physical_symbol: str = "ETHUSDT",
+    token_symbol: str = "STETHUSDT",
 ) -> None:
     """LST basis: physical = ETH/USDT, token = stETH/USDT (log-ratio tracks discount)."""
-    streams = "ethusdt@trade/stethusdt@trade"
+    streams = f"{physical_symbol.lower()}@trade/{token_symbol.lower()}@trade"
     uri = BINANCE_WS_COMBINED.format(streams)
     last_eth: float | None = None
     last_steth: float | None = None
@@ -134,12 +143,17 @@ async def _consume_lst(
                         sym = str(raw.get("s", "")).upper()
                         if not math.isfinite(price) or price <= 0:
                             continue
-                        if sym == "ETHUSDT":
+                        if sym == physical_symbol.upper():
                             last_eth = price
-                        elif sym == "STETHUSDT":
+                        elif sym == token_symbol.upper():
                             last_steth = price
                         if last_eth is not None and last_steth is not None:
-                            out_q.put((time.time(), last_eth, last_steth))
+                            tick = (time.time(), last_eth, last_steth)
+                            out_q.put(
+                                (instrument_id, *tick)
+                                if instrument_id is not None
+                                else tick
+                            )
         except asyncio.CancelledError:
             raise
         except Exception as exc:  # noqa: BLE001
@@ -156,22 +170,48 @@ async def _consume_lst(
 
 
 async def _async_main(
-    out_q: "queue.Queue[tuple[float, float, float]]",
+    out_q: "queue.Queue",
     stop: threading.Event,
     mode: FeedMode,
+    instrument_id: str | None = None,
+    physical_symbol: str = "",
+    token_symbol: str = "",
 ) -> None:
     if mode == "stable":
-        await _consume_stable(out_q, stop)
+        await _consume_stable(
+            out_q,
+            stop,
+            instrument_id,
+            token_symbol or "USDCUSDT",
+        )
     else:
-        await _consume_lst(out_q, stop)
+        await _consume_lst(
+            out_q,
+            stop,
+            instrument_id,
+            physical_symbol or "ETHUSDT",
+            token_symbol or "STETHUSDT",
+        )
 
 
 def _thread_target(
-    out_q: "queue.Queue[tuple[float, float, float]]",
+    out_q: "queue.Queue",
     stop: threading.Event,
     mode: FeedMode,
+    instrument_id: str | None = None,
+    physical_symbol: str = "",
+    token_symbol: str = "",
 ) -> None:
-    asyncio.run(_async_main(out_q, stop, mode))
+    asyncio.run(
+        _async_main(
+            out_q,
+            stop,
+            mode,
+            instrument_id,
+            physical_symbol,
+            token_symbol,
+        )
+    )
 
 
 def start_binance_feed_thread(
@@ -195,6 +235,32 @@ def start_binance_feed_thread(
     )
     t.start()
     return t
+
+
+def start_instrument_feed_threads(
+    out_q: "queue.Queue",
+    stop: threading.Event,
+    instruments: Iterable[tuple[str, FeedMode, str, str]],
+) -> list[threading.Thread]:
+    """Start one tagged Binance consumer thread per configured instrument."""
+    threads: list[threading.Thread] = []
+    for instrument_id, mode, physical_symbol, token_symbol in instruments:
+        thread = threading.Thread(
+            target=_thread_target,
+            args=(
+                out_q,
+                stop,
+                mode,
+                instrument_id,
+                physical_symbol,
+                token_symbol,
+            ),
+            name=f"dyops-binance-{instrument_id}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
 
 
 def resolve_feed_mode() -> FeedMode:

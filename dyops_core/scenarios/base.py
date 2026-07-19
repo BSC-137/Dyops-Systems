@@ -17,6 +17,7 @@ class Scenario:
     physical_price: list[float]
     token_price: list[float]
     expected_outcomes: dict[str, Any]
+    instrument_id: str = "default"
 
     def __post_init__(self) -> None:
         lengths = {
@@ -26,6 +27,8 @@ class Scenario:
         }
         if not self.name:
             raise ValueError("scenario name must not be empty")
+        if not self.instrument_id:
+            raise ValueError("instrument_id must not be empty")
         if lengths == {0}:
             raise ValueError("scenario must contain at least one tick")
         if len(lengths) != 1:

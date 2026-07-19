@@ -1,6 +1,7 @@
 export type SentinelLevel = "MONITORING" | "BREACH" | "AUDIT"
 
 export interface TelemetryPayload {
+  instrument_id?: string
   level: SentinelLevel
   level_value: number
   timestamp: number
@@ -28,6 +29,7 @@ export interface ChartPoint {
 
 /** GET /api/pulse */
 export interface PulseResponse {
+  instrument_id?: string
   live: boolean
   last_tick_age_sec: number | null
   events_session: number
@@ -59,6 +61,7 @@ export interface HistoryTraceBundle {
 }
 
 export interface HistoryTracePoint {
+  instrument_id?: string
   t: number
   measured_basis: number
   filtered_basis: number
@@ -70,6 +73,7 @@ export interface HistoryTracePoint {
 
 export interface AuditRow {
   id: number
+  instrument_id?: string
   timestamp: number
   event_id: number | null
   report: {
@@ -100,4 +104,17 @@ export interface IncidentWindow {
   peakMahalanobis: number
   criticalityPeakPct: number
   audits: AuditRow[]
+}
+
+export interface InstrumentInfo {
+  id: string
+  label: string
+  feed_mode: string
+  physical_symbol: string
+  token_symbol: string
+  synthetic: boolean
+  live: boolean
+  events_session: number
+  events_total_sqlite: number
+  last_tick_age_sec: number | null
 }

@@ -42,11 +42,20 @@ def client(
     monkeypatch.delenv("DYOPS_DEMO_INJECT", raising=False)
     monkeypatch.delenv("DYOPS_WEBHOOK_URLS", raising=False)
     monkeypatch.delenv("DYOPS_INSTRUMENT_ID", raising=False)
+    monkeypatch.delenv("DYOPS_INSTRUMENTS", raising=False)
 
     @asynccontextmanager
     async def test_lifespan(_: FastAPI) -> AsyncIterator[None]:
         _drain_telemetry_queue()
         api._persistence = PersistenceManager(tmp_path / "api-contract.db")
+        config = api.InstrumentConfig(
+            id="default",
+            label="Default stable",
+            feed_mode="stable",
+            physical_symbol="USD",
+            token_symbol="USDCUSDT",
+            synthetic=True,
+        )
         api._sentinel = DyopsSentinel(
             api.dyops_core.BasisObserver(
                 name="api-contract-test",
@@ -55,7 +64,13 @@ def client(
             ),
             auditor=None,
             persistence=api._persistence,
+            instrument_id=config.id,
         )
+        api._instrument_configs = (config,)
+        api._primary_instrument_id = config.id
+        api._instrument_runtimes = {
+            config.id: api.InstrumentRuntime(config, api._sentinel)
+        }
         api._session_event_count = 0
         api._last_tick_monotonic = 0.0
 
@@ -71,6 +86,9 @@ def client(
             api._persistence.close()
             api._persistence = None
             api._sentinel = None
+            api._instrument_configs = ()
+            api._instrument_runtimes = {}
+            api._primary_instrument_id = "default"
             api._session_event_count = 0
             api._last_tick_monotonic = 0.0
             _drain_telemetry_queue()
@@ -103,6 +121,49 @@ def test_status_uses_sentinel_breach_threshold(client: TestClient) -> None:
         response.json()["mahalanobis_breach_threshold"]
         == sentinel.MAHALANOBIS_BREACH
     )
+
+
+def test_instruments_and_scoped_history(
+    client: TestClient,
+) -> None:
+    assert api._persistence is not None
+    lst_config = api.InstrumentConfig(
+        id="lst",
+        label="ETH / stETH",
+        feed_mode="lst",
+        physical_symbol="ETHUSDT",
+        token_symbol="STETHUSDT",
+    )
+    lst_sentinel = DyopsSentinel(
+        api.dyops_core.BasisObserver(
+            name="api-contract-lst",
+            theta=1.0,
+            ring_buffer_capacity=1000,
+        ),
+        auditor=None,
+        persistence=api._persistence,
+        instrument_id=lst_config.id,
+    )
+    api._instrument_configs = (*api._instrument_configs, lst_config)
+    api._instrument_runtimes[lst_config.id] = api.InstrumentRuntime(
+        lst_config,
+        lst_sentinel,
+    )
+
+    api._telemetry_queue.put(("default", 1.0, 1.0, 1.0))
+    api._telemetry_queue.put(("lst", 2.0, 2000.0, 1999.0))
+    _wait_for_persisted_events(client, 2)
+
+    instruments = client.get("/api/instruments")
+    assert [row["id"] for row in instruments.json()] == ["default", "lst"]
+
+    default_history = client.get("/api/history", params={"instrument": "default"})
+    lst_history = client.get("/api/history", params={"instrument": "lst"})
+    assert {row["instrument_id"] for row in default_history.json()} == {"default"}
+    assert {row["instrument_id"] for row in lst_history.json()} == {"lst"}
+    assert client.get("/api/pulse", params={"instrument": "lst"}).json()[
+        "events_session"
+    ] == 1
 
 
 def test_breach_sends_webhook_but_monitoring_does_not(
@@ -146,7 +207,7 @@ def test_breach_sends_webhook_but_monitoring_does_not(
     payload = json.loads(requests[0].content)
     assert payload["level"] == "BREACH"
     assert payload["mahalanobis"] > sentinel.MAHALANOBIS_BREACH
-    assert payload["instrument_id"] == "usdc-usdt"
+    assert payload["instrument_id"] == "default"
     assert {
         "timestamp",
         "innovation",
@@ -208,6 +269,7 @@ def test_telemetry_websocket_receives_event_result(client: TestClient) -> None:
         "physical_price",
         "token_price",
         "session_event_index",
+        "instrument_id",
     } <= payload.keys()
     assert {
         "filtered_basis",
@@ -220,6 +282,7 @@ def test_telemetry_websocket_receives_event_result(client: TestClient) -> None:
     assert payload["physical_price"] == 100.0
     assert payload["token_price"] == 99.0
     assert payload["session_event_index"] == 1
+    assert payload["instrument_id"] == "default"
 
 
 def test_demo_injection_is_guarded_and_emits_breach(

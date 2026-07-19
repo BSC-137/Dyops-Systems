@@ -51,6 +51,7 @@ class ScenarioMetrics:
 @dataclass(frozen=True)
 class ScenarioResult:
     scenario: str
+    instrument_id: str
     description: str
     expected_outcomes: dict[str, Any]
     observer_parameters: dict[str, Any]
@@ -150,6 +151,7 @@ def _compute_metrics(ticks: list[TickResult]) -> ScenarioMetrics:
 def run_scenario(
     scenario: Scenario,
     *,
+    instrument_id: str | None = None,
     observer_factory: ObserverFactory = dyops_core.BasisObserver,
     sentinel_factory: SentinelFactory = DyopsSentinel,
 ) -> ScenarioResult:
@@ -160,8 +162,9 @@ def run_scenario(
     criticality policy.
     """
 
+    effective_instrument_id = instrument_id or scenario.instrument_id or "default"
     observer = observer_factory(
-        name=f"dyops-scenario-{scenario.name}",
+        name=f"dyops-scenario-{effective_instrument_id}-{scenario.name}",
         theta=1.0,
         ring_buffer_capacity=1000,
     )
@@ -224,6 +227,7 @@ def run_scenario(
 
     return ScenarioResult(
         scenario=scenario.name,
+        instrument_id=effective_instrument_id,
         description=scenario.description,
         expected_outcomes=scenario.expected_outcomes,
         observer_parameters={

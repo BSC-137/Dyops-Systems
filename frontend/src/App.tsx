@@ -18,6 +18,7 @@ import type {
   AuditRow,
   ChartPoint,
   HistoryTraceBundle,
+  InstrumentInfo,
   PulseResponse,
   SentinelLevel,
   StatusResponse,
@@ -116,6 +117,7 @@ function levelBadgeVariant(
 }
 
 type HistoryApiRow = {
+  instrument_id?: string
   t: number
   measured_basis: number
   filtered_basis: number
@@ -126,6 +128,8 @@ type HistoryApiRow = {
 
 export default function App() {
   const [activeTab, setActiveTab] = useState<"live" | "incidents">("live")
+  const [instruments, setInstruments] = useState<InstrumentInfo[]>([])
+  const [selectedInstrumentId, setSelectedInstrumentId] = useState("")
   const [chartData, setChartData] = useState<ChartPoint[]>([])
   const [audits, setAudits] = useState<AuditRow[]>([])
   const [pulseLive, setPulseLive] = useState(false)
@@ -161,7 +165,35 @@ export default function App() {
     let cancelled = false
     ;(async () => {
       try {
-        const r = await fetch("/api/history?limit=500")
+        const response = await fetch("/api/instruments")
+        if (!response.ok) throw new Error(String(response.status))
+        const next = (await response.json()) as InstrumentInfo[]
+        if (cancelled) return
+        setInstruments(next)
+        setSelectedInstrumentId((current) =>
+          next.some((instrument) => instrument.id === current)
+            ? current
+            : (next[0]?.id ?? "default"),
+        )
+      } catch {
+        if (!cancelled) {
+          setInstruments([])
+          setSelectedInstrumentId("default")
+        }
+      }
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [])
+
+  useEffect(() => {
+    let cancelled = false
+    ;(async () => {
+      try {
+        const params = new URLSearchParams({ limit: "500" })
+        if (selectedInstrumentId) params.set("instrument", selectedInstrumentId)
+        const r = await fetch(`/api/history?${params}`)
         if (!r.ok) throw new Error(String(r.status))
         const rows: HistoryApiRow[] = await r.json()
         if (cancelled) return
@@ -181,36 +213,24 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [selectedInstrumentId])
 
   const loadHistoryTrace = useCallback(async () => {
     try {
-      const r = await fetch("/api/history/trace?limit=500")
+      const params = new URLSearchParams({ limit: "500" })
+      if (selectedInstrumentId) params.set("instrument", selectedInstrumentId)
+      const r = await fetch(`/api/history/trace?${params}`)
       if (!r.ok) throw new Error(String(r.status))
       const bundle: HistoryTraceBundle = await r.json()
       setTraceBundle(bundle)
     } catch {
       setTraceBundle(null)
     }
-  }, [])
+  }, [selectedInstrumentId])
 
   useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const r = await fetch("/api/history/trace?limit=500")
-        if (!r.ok) throw new Error(String(r.status))
-        const bundle: HistoryTraceBundle = await r.json()
-        if (cancelled) return
-        setTraceBundle(bundle)
-      } catch {
-        if (!cancelled) setTraceBundle(null)
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [])
+    void loadHistoryTrace()
+  }, [loadHistoryTrace])
 
   useEffect(() => {
     if (activeTab === "incidents") void loadHistoryTrace()
@@ -245,6 +265,12 @@ export default function App() {
           }
           if (msg.type !== "telemetry") return
           const p = msg.payload
+          if (
+            selectedInstrumentId &&
+            (p.instrument_id ?? "default") !== selectedInstrumentId
+          ) {
+            return
+          }
           mergeChart({
             t: p.timestamp,
             measured_basis: measuredBasisFromPrices(
@@ -292,7 +318,7 @@ export default function App() {
         snapshotHighlightTimerRef.current = null
       }
     }
-  }, [mergeChart])
+  }, [mergeChart, selectedInstrumentId])
 
   const upsertAudit = useCallback((row: AuditRow) => {
     const m = auditsRef.current
@@ -323,7 +349,11 @@ export default function App() {
     const tick = async () => {
       try {
         const [pulseR, statusR] = await Promise.all([
-          fetch("/api/pulse"),
+          fetch(
+            selectedInstrumentId
+              ? `/api/pulse?instrument=${encodeURIComponent(selectedInstrumentId)}`
+              : "/api/pulse",
+          ),
           fetch("/api/status"),
         ])
         if (pulseR.ok) {
@@ -341,7 +371,11 @@ export default function App() {
         if (statusR.ok) {
           const s = (await statusR.json()) as StatusResponse
           setGeminiOk(s.gemini_configured)
-          setFeedMode(s.binance_feed)
+          setFeedMode(
+            instruments.find(
+              (instrument) => instrument.id === selectedInstrumentId,
+            )?.feed_mode ?? s.binance_feed,
+          )
           setMahalanobisBreachThreshold(s.mahalanobis_breach_threshold)
           setCriticalityWindowEvents(s.criticality_window_events)
           setCriticalityAuditPct(s.criticality_audit_pct)
@@ -355,13 +389,17 @@ export default function App() {
     tick()
     const t = setInterval(tick, 2000)
     return () => clearInterval(t)
-  }, [])
+  }, [instruments, selectedInstrumentId])
 
   const injectSuddenDepeg = useCallback(async () => {
     setDemoInjectRunning(true)
     try {
       const response = await fetch(
-        "/api/demo/inject_scenario?name=sudden_depeg",
+        `/api/demo/inject_scenario?name=sudden_depeg${
+          selectedInstrumentId
+            ? `&instrument=${encodeURIComponent(selectedInstrumentId)}`
+            : ""
+        }`,
         { method: "POST" },
       )
       if (!response.ok) throw new Error(String(response.status))
@@ -372,7 +410,7 @@ export default function App() {
     } catch {
       setDemoInjectRunning(false)
     }
-  }, [])
+  }, [selectedInstrumentId])
 
   useEffect(
     () => () => {
@@ -522,11 +560,32 @@ export default function App() {
 
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <Activity className="size-3.5" aria-hidden />
-            <span className="uppercase tracking-wide">Global events</span>
+            <span className="uppercase tracking-wide">Instrument events</span>
             <span className="font-mono-nums font-semibold text-stone-400 tabular-nums">
               {eventsTotal.toLocaleString()}
             </span>
           </div>
+
+          {instruments.length > 1 ? (
+            <label className="flex items-center gap-2 text-[10px] uppercase tracking-wide text-zinc-600">
+              Instrument
+              <select
+                value={selectedInstrumentId}
+                onChange={(event) => setSelectedInstrumentId(event.target.value)}
+                className="rounded-md border border-zinc-700 bg-[var(--color-terminal)] px-2 py-1 font-mono-nums text-[10px] normal-case text-zinc-300 outline-none focus:border-zinc-500"
+              >
+                {instruments.map((instrument) => (
+                  <option key={instrument.id} value={instrument.id}>
+                    {instrument.label}
+                  </option>
+                ))}
+              </select>
+            </label>
+          ) : instruments[0] ? (
+            <Badge variant="outline" className="font-mono-nums text-[10px]">
+              {instruments[0].label}
+            </Badge>
+          ) : null}
 
           <Badge variant="outline" className="font-mono-nums text-[10px]">
             {feedMode}
@@ -751,8 +810,13 @@ export default function App() {
       </main>
       ) : (
         <IncidentsTab
+          instrumentId={selectedInstrumentId || "default"}
           trace={traceBundle}
-          audits={audits}
+          audits={audits.filter(
+            (audit) =>
+              (audit.instrument_id ?? "default") ===
+              (selectedInstrumentId || "default"),
+          )}
           breachThreshold={mahalanobisBreachThreshold}
           criticalityWindowEvents={criticalityWindowEvents}
           criticalityAuditPct={criticalityAuditPct}

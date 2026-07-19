@@ -10,6 +10,7 @@ import type {
 } from "@/types/telemetry"
 
 type IncidentsTabProps = {
+  instrumentId: string
   trace: HistoryTraceBundle | null
   audits: AuditRow[]
   breachThreshold: number
@@ -35,12 +36,14 @@ function formatTime(timestamp: number, includeDate = false): string {
 }
 
 function exportIncident(
+  instrumentId: string,
   incident: IncidentWindow,
   points: HistoryTraceBundle["points"],
   breachThreshold: number,
 ) {
   const payload = {
     exported_at: new Date().toISOString(),
+    instrument_id: instrumentId,
     incident: {
       id: incident.id,
       kind: incident.kind,
@@ -66,6 +69,7 @@ function exportIncident(
 }
 
 export function IncidentsTab({
+  instrumentId,
   trace,
   audits,
   breachThreshold,
@@ -181,7 +185,12 @@ export function IncidentsTab({
                 <button
                   type="button"
                   onClick={() =>
-                    exportIncident(selected, selectedPoints, breachThreshold)
+                    exportIncident(
+                      instrumentId,
+                      selected,
+                      selectedPoints,
+                      breachThreshold,
+                    )
                   }
                   className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 font-mono-nums text-[10px] uppercase tracking-wide text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
                 >
