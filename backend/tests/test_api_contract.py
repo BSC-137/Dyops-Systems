@@ -150,12 +150,18 @@ def test_instruments_and_scoped_history(
         lst_sentinel,
     )
 
-    api._telemetry_queue.put(("default", 1.0, 1.0, 1.0))
-    api._telemetry_queue.put(("lst", 2.0, 2000.0, 1999.0))
+    with client.websocket_connect("/ws/telemetry?instrument=lst") as websocket:
+        api._telemetry_queue.put(("default", 1.0, 1.0, 1.0))
+        api._telemetry_queue.put(("lst", 2.0, 2000.0, 1999.0))
+        message = websocket.receive_json()
+    assert message["payload"]["instrument_id"] == "lst"
     _wait_for_persisted_events(client, 2)
 
     instruments = client.get("/api/instruments")
     assert [row["id"] for row in instruments.json()] == ["default", "lst"]
+    lst_instrument = instruments.json()[1]
+    assert lst_instrument["level"] == "MONITORING"
+    assert isinstance(lst_instrument["last_mahalanobis"], float)
 
     default_history = client.get("/api/history", params={"instrument": "default"})
     lst_history = client.get("/api/history", params={"instrument": "lst"})

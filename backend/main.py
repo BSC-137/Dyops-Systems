@@ -216,17 +216,21 @@ def _event_result_model(er: EventResult) -> dict[str, Any]:
 
 class ConnectionHub:
     def __init__(self) -> None:
-        self._telemetry: set[WebSocket] = set()
+        self._telemetry: dict[WebSocket, str | None] = {}
         self._audits: set[WebSocket] = set()
         self._lock = asyncio.Lock()
 
-    async def register_telemetry(self, ws: WebSocket) -> None:
+    async def register_telemetry(
+        self,
+        ws: WebSocket,
+        instrument_id: str | None = None,
+    ) -> None:
         async with self._lock:
-            self._telemetry.add(ws)
+            self._telemetry[ws] = instrument_id
 
     async def unregister_telemetry(self, ws: WebSocket) -> None:
         async with self._lock:
-            self._telemetry.discard(ws)
+            self._telemetry.pop(ws, None)
 
     async def register_audits(self, ws: WebSocket) -> None:
         async with self._lock:
@@ -244,13 +248,18 @@ class ConnectionHub:
         )
         async with self._lock:
             dead: list[WebSocket] = []
-            for ws in self._telemetry:
+            for ws, instrument_id in self._telemetry.items():
+                if (
+                    instrument_id is not None
+                    and instrument_id != payload.get("instrument_id")
+                ):
+                    continue
                 try:
                     await ws.send_text(raw)
                 except Exception:  # noqa: BLE001
                     dead.append(ws)
             for ws in dead:
-                self._telemetry.discard(ws)
+                self._telemetry.pop(ws, None)
 
     async def broadcast_audit(self, payload: dict[str, Any]) -> None:
         raw = json.dumps(
@@ -289,6 +298,8 @@ class InstrumentRuntime:
     sentinel: DyopsSentinel
     session_event_count: int = 0
     last_tick_monotonic: float = 0.0
+    level: str = "MONITORING"
+    last_mahalanobis: float | None = None
 
 
 _instrument_runtimes: dict[str, InstrumentRuntime] = {}
@@ -460,6 +471,9 @@ async def _telemetry_pump() -> None:
             continue
         runtime.last_tick_monotonic = time.monotonic()
         runtime.session_event_count += 1
+        runtime.level = result.level.name
+        mahalanobis = float(result.health.mahalanobis_distance)
+        runtime.last_mahalanobis = mahalanobis if math.isfinite(mahalanobis) else None
         if runtime.config.id == _primary_instrument_id:
             _last_tick_monotonic = runtime.last_tick_monotonic
             _session_event_count = runtime.session_event_count
@@ -555,6 +569,8 @@ class InstrumentResponse(BaseModel):
     token_symbol: str
     synthetic: bool
     live: bool
+    level: str
+    last_mahalanobis: float | None
     events_session: int
     events_total_sqlite: int
     last_tick_age_sec: float | None
@@ -583,6 +599,8 @@ async def api_instruments() -> list[InstrumentResponse]:
             InstrumentResponse(
                 **config.to_dict(),
                 live=age is not None and age <= 12.0,
+                level=runtime.level,
+                last_mahalanobis=runtime.last_mahalanobis,
                 events_session=runtime.session_event_count,
                 events_total_sqlite=(
                     _persistence.count_events(config.id) if _persistence else 0
@@ -757,7 +775,11 @@ async def api_pulse(instrument: str | None = None) -> PulseResponse:
 @app.websocket("/ws/telemetry")
 async def websocket_telemetry(ws: WebSocket) -> None:
     await ws.accept()
-    await hub.register_telemetry(ws)
+    instrument_id = ws.query_params.get("instrument")
+    if instrument_id is not None and instrument_id not in _instrument_runtimes:
+        await ws.close(code=1008, reason="Unknown instrument")
+        return
+    await hub.register_telemetry(ws, instrument_id)
     try:
         while True:
             await ws.receive_text()  # optional client pings; discard

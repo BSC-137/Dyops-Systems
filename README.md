@@ -415,7 +415,7 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 | Method / path | Role |
 |---------------|------|
-| `GET /api/instruments` | Instrument ids, labels, feed/symbol metadata, pulse state, and scoped event counts |
+| `GET /api/instruments` | Instrument ids, labels, live/stale state, current level, last Mahalanobis, feed metadata, and scoped event counts |
 | `GET /api/status` | `gemini_configured`, `webhook_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
 | `GET /api/pulse?instrument=` | Instrument-scoped freshness, counts, `summary`, and `explainability` |
 | `GET /api/history?instrument=&limit=` | Instrument-scoped bare **`HistoryPoint[]`**, including `instrument_id` |

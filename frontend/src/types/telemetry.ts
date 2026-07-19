@@ -114,6 +114,8 @@ export interface InstrumentInfo {
   token_symbol: string
   synthetic: boolean
   live: boolean
+  level: SentinelLevel
+  last_mahalanobis: number | null
   events_session: number
   events_total_sqlite: number
   last_tick_age_sec: number | null

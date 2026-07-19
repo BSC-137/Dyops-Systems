@@ -12,6 +12,7 @@ import {
   YAxis,
 } from "recharts"
 import { IncidentsTab } from "@/components/IncidentsTab"
+import { InstrumentsTab } from "@/components/InstrumentsTab"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import type {
@@ -127,7 +128,8 @@ type HistoryApiRow = {
 }
 
 export default function App() {
-  const [activeTab, setActiveTab] = useState<"live" | "incidents">("live")
+  const [activeTab, setActiveTab] =
+    useState<"live" | "incidents" | "instruments">("live")
   const [instruments, setInstruments] = useState<InstrumentInfo[]>([])
   const [selectedInstrumentId, setSelectedInstrumentId] = useState("")
   const [chartData, setChartData] = useState<ChartPoint[]>([])
@@ -252,7 +254,13 @@ export default function App() {
     const connect = () => {
       if (cancelled) return
       clearReconnect()
-      ws = new WebSocket(wsUrl("/ws/telemetry"))
+      ws = new WebSocket(
+        wsUrl(
+          selectedInstrumentId
+            ? `/ws/telemetry?instrument=${encodeURIComponent(selectedInstrumentId)}`
+            : "/ws/telemetry",
+        ),
+      )
       ws.onopen = () => {
         attempt = 0
         setTelemetryStreamPaused(false)
@@ -348,13 +356,14 @@ export default function App() {
   useEffect(() => {
     const tick = async () => {
       try {
-        const [pulseR, statusR] = await Promise.all([
+        const [pulseR, statusR, instrumentsR] = await Promise.all([
           fetch(
             selectedInstrumentId
               ? `/api/pulse?instrument=${encodeURIComponent(selectedInstrumentId)}`
               : "/api/pulse",
           ),
           fetch("/api/status"),
+          fetch("/api/instruments"),
         ])
         if (pulseR.ok) {
           const p = (await pulseR.json()) as PulseResponse
@@ -381,6 +390,9 @@ export default function App() {
           setCriticalityAuditPct(s.criticality_audit_pct)
           setAuditCooldownTicks(s.audit_cooldown_ticks)
           setDemoInjectEnabled(s.demo_inject_enabled)
+        }
+        if (instrumentsR.ok) {
+          setInstruments((await instrumentsR.json()) as InstrumentInfo[])
         }
       } catch {
         /* ignore */
@@ -606,7 +618,7 @@ export default function App() {
         role="tablist"
         aria-label="Dyops workspace"
       >
-        {(["live", "incidents"] as const).map((tab) => (
+        {(["live", "incidents", "instruments"] as const).map((tab) => (
           <button
             key={tab}
             type="button"
@@ -808,7 +820,7 @@ export default function App() {
           </Card>
         </section>
       </main>
-      ) : (
+      ) : activeTab === "incidents" ? (
         <IncidentsTab
           instrumentId={selectedInstrumentId || "default"}
           trace={traceBundle}
@@ -820,6 +832,14 @@ export default function App() {
           breachThreshold={mahalanobisBreachThreshold}
           criticalityWindowEvents={criticalityWindowEvents}
           criticalityAuditPct={criticalityAuditPct}
+        />
+      ) : (
+        <InstrumentsTab
+          instruments={instruments}
+          onSelect={(instrumentId) => {
+            setSelectedInstrumentId(instrumentId)
+            setActiveTab("live")
+          }}
         />
       )}
     </div>
