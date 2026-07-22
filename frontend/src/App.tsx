@@ -1,5 +1,13 @@
 import { Activity, BrainCircuit, FlaskConical, Radio } from "lucide-react"
-import { useCallback, useEffect, useMemo, useRef, useState } from "react"
+import {
+  lazy,
+  Suspense,
+  useCallback,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+} from "react"
 import {
   CartesianGrid,
   Legend,
@@ -11,8 +19,6 @@ import {
   XAxis,
   YAxis,
 } from "recharts"
-import { IncidentsTab } from "@/components/IncidentsTab"
-import { InstrumentsTab } from "@/components/InstrumentsTab"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
 import { deriveIncidentWindows } from "@/lib/incidents"
@@ -26,6 +32,25 @@ import type {
   StatusResponse,
   TelemetryPayload,
 } from "@/types/telemetry"
+
+const IncidentsTab = lazy(() =>
+  import("@/components/IncidentsTab").then((module) => ({
+    default: module.IncidentsTab,
+  })),
+)
+const InstrumentsTab = lazy(() =>
+  import("@/components/InstrumentsTab").then((module) => ({
+    default: module.InstrumentsTab,
+  })),
+)
+
+function TabFallback({ label }: { label: string }) {
+  return (
+    <div className="flex flex-1 items-center justify-center p-8 font-mono-nums text-xs text-zinc-600">
+      Loading {label}…
+    </div>
+  )
+}
 
 const MAX_POINTS = 500
 
@@ -145,7 +170,10 @@ export default function App() {
   const [audits, setAudits] = useState<AuditRow[]>([])
   const [pulseLive, setPulseLive] = useState(false)
   const [eventsTotal, setEventsTotal] = useState<number>(0)
-  const [geminiOk, setGeminiOk] = useState(false)
+  const [geminiConfigured, setGeminiConfigured] = useState(false)
+  const [geminiReady, setGeminiReady] = useState(false)
+  const [geminiLastError, setGeminiLastError] = useState<string | null>(null)
+  const [softwareVersion, setSoftwareVersion] = useState("unknown")
   const [feedMode, setFeedMode] = useState<string>("—")
   const [mahalanobisBreachThreshold, setMahalanobisBreachThreshold] =
     useState<number>(3.0)
@@ -164,7 +192,9 @@ export default function App() {
   const [staleCutoffSec, setStaleCutoffSec] = useState(12)
   const [webhookConfigured, setWebhookConfigured] = useState(false)
   const [feedSource, setFeedSource] =
-    useState<"binance_market" | "offline_deterministic">("binance_market")
+    useState<
+      "binance_market" | "offline_deterministic" | "feed_disabled"
+    >("binance_market")
   const [demoInjectionActive, setDemoInjectionActive] = useState(false)
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceBundle, setTraceBundle] = useState<HistoryTraceBundle | null>(null)
@@ -418,7 +448,10 @@ export default function App() {
         }
         if (statusR.ok) {
           const s = (await statusR.json()) as StatusResponse
-          setGeminiOk(s.gemini_configured)
+          setGeminiConfigured(s.gemini_configured)
+          setGeminiReady(s.gemini_ready)
+          setGeminiLastError(s.gemini_last_error)
+          setSoftwareVersion(s.software_version)
           setWebhookConfigured(!!s.webhook_configured)
           setFeedSource(s.feed_source)
           setFeedMode(s.binance_feed)
@@ -604,7 +637,9 @@ export default function App() {
     ],
   )
   const sourceLabel =
-    ingestionSource === "demo"
+    feedSource === "feed_disabled" && ingestionSource === "none"
+      ? "FEED DISABLED · STALE"
+      : ingestionSource === "demo"
       ? `SIMULATED · ${demoScenario ?? "SCENARIO"}`
       : ingestionSource === "offline"
         ? "SIMULATED · OFFLINE"
@@ -716,14 +751,20 @@ export default function App() {
             <BrainCircuit className="size-3.5" aria-hidden />
             <span className="uppercase tracking-wide">Gemini</span>
             <Badge
-              variant={geminiOk ? "success" : "outline"}
+              variant={geminiReady ? "success" : "outline"}
               title={
-                geminiOk
-                  ? "Optional narrative auditor key configured"
-                  : "Not configured; deterministic monitoring and reasoning remain active"
+                geminiConfigured
+                  ? geminiReady
+                    ? "API key set and local auditor initialized; endpoint reachability is not health-checked. Injected scenarios do not invoke Gemini."
+                    : `API key set but local auditor initialization failed${geminiLastError ? `: ${geminiLastError}` : ""}. Deterministic monitoring remains active.`
+                  : "No key set. Deterministic monitoring and reasoning remain active; injected scenarios do not invoke Gemini."
               }
             >
-              {geminiOk ? "OPTIONAL · CONFIGURED" : "OPTIONAL · NOT CONFIGURED"}
+              {geminiConfigured
+                ? geminiReady
+                  ? "OPTIONAL · KEY SET"
+                  : "OPTIONAL · KEY SET · INIT FAILED"
+                : "OPTIONAL · NOT CONFIGURED"}
             </Badge>
           </div>
 
@@ -1008,22 +1049,27 @@ export default function App() {
         </section>
       </main>
       ) : activeTab === "incidents" ? (
-        <IncidentsTab
-          instrumentId={selectedInstrumentId || "default"}
-          trace={traceBundle}
-          audits={selectedAudits}
-          breachThreshold={mahalanobisBreachThreshold}
-          criticalityWindowEvents={criticalityWindowEvents}
-          criticalityAuditPct={criticalityAuditPct}
-        />
+        <Suspense fallback={<TabFallback label="incidents" />}>
+          <IncidentsTab
+            instrumentId={selectedInstrumentId || "default"}
+            trace={traceBundle}
+            audits={selectedAudits}
+            breachThreshold={mahalanobisBreachThreshold}
+            criticalityWindowEvents={criticalityWindowEvents}
+            criticalityAuditPct={criticalityAuditPct}
+            softwareVersion={softwareVersion}
+          />
+        </Suspense>
       ) : (
-        <InstrumentsTab
-          instruments={instruments}
-          onSelect={(instrumentId) => {
-            setSelectedInstrumentId(instrumentId)
-            setActiveTab("live")
-          }}
-        />
+        <Suspense fallback={<TabFallback label="instruments" />}>
+          <InstrumentsTab
+            instruments={instruments}
+            onSelect={(instrumentId) => {
+              setSelectedInstrumentId(instrumentId)
+              setActiveTab("live")
+            }}
+          />
+        </Suspense>
       )}
     </div>
   )

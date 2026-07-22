@@ -1,15 +1,24 @@
 {
   "artifact_type": "dyops_incident_export",
-  "artifact_version": 1,
+  "schema_version": "2.0",
   "exported_at": "2026-07-22T12:00:00.000Z",
   "instrument_id": "default",
+  "software": {
+    "name": "dyops",
+    "version": "1.0.0"
+  },
+  "classification": {
+    "unsigned": true,
+    "non_claim": "Operational forensic export — not a regulatory attestation or signed compliance report.",
+    "assembled_by": "dyops_frontend",
+    "exported_at_source": "client_browser_clock"
+  },
   "data_sources": [
     "demo"
   ],
   "scenarios": [
     "sudden_depeg"
   ],
-  "reasoning_source": "deterministic_replay",
   "incident": {
     "id": "breach-1753185600-1753185600.000001",
     "kind": "BREACH",
@@ -19,32 +28,42 @@
     "peak_mahalanobis": 18.2793,
     "criticality_peak_pct": 12.5
   },
-  "summary": "BREACH window · 2 ticks · 2 breach moments · peak Mahalanobis 18.279",
-  "audits": [],
-  "points": [
-    {
-      "instrument_id": "default",
-      "ingestion_source": "demo",
-      "scenario": "sudden_depeg",
-      "t": 1753185600,
-      "measured_basis": 0.0202027,
-      "filtered_basis": 0.002901,
-      "innovation": 0.020101,
-      "mahalanobis": 18.2793,
-      "valid": true,
-      "reasoning": "Mahalanobis distance at 18.28 normalized units (509% above sentinel threshold). Correlation fracture detected."
-    },
-    {
-      "instrument_id": "default",
-      "ingestion_source": "demo",
-      "scenario": "sudden_depeg",
-      "t": 1753185600.000001,
-      "measured_basis": 0.0202027,
-      "filtered_basis": 0.005112,
-      "innovation": 0.017302,
-      "mahalanobis": 12.741,
-      "valid": true,
-      "reasoning": "Mahalanobis distance at 12.74 normalized units (325% above sentinel threshold). Correlation fracture detected."
-    }
-  ]
+  "deterministic_evidence": {
+    "source": "server_deterministic_replay",
+    "mahalanobis_breach_threshold": 3,
+    "summary": "BREACH window · 2 ticks · 2 breach moments · peak Mahalanobis 18.279",
+    "points": [
+      {
+        "instrument_id": "default",
+        "ingestion_source": "demo",
+        "scenario": "sudden_depeg",
+        "t": 1753185600,
+        "measured_basis": 0.0202027,
+        "filtered_basis": 0.002901,
+        "innovation": 0.020101,
+        "mahalanobis": 18.2793,
+        "valid": true,
+        "reasoning": "Mahalanobis distance at 18.28 normalized units (509% above sentinel threshold). Correlation fracture detected."
+      },
+      {
+        "instrument_id": "default",
+        "ingestion_source": "demo",
+        "scenario": "sudden_depeg",
+        "t": 1753185600.000001,
+        "measured_basis": 0.0202027,
+        "filtered_basis": 0.005112,
+        "innovation": 0.017302,
+        "mahalanobis": 12.741,
+        "valid": true,
+        "reasoning": "Mahalanobis distance at 12.74 normalized units (325% above sentinel threshold). Correlation fracture detected."
+      }
+    ]
+  },
+  "optional_llm_evidence": {
+    "source": "gemini_when_present",
+    "present": false,
+    "audits": []
+  },
+  "integrity_notice": "SHA-256 covers canonical JSON without content_sha256. It is tamper-evidence for comparison, not a digital signature or legal seal.",
+  "content_sha256": "558c3e8702d3232507f65636f814abfa93a3de265241bf8403e1656024be8fd6"
 }

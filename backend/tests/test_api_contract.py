@@ -43,6 +43,7 @@ def client(
     monkeypatch.delenv("DYOPS_DEMO_SECRET", raising=False)
     monkeypatch.delenv("DYOPS_DEMO_WEBHOOKS", raising=False)
     monkeypatch.delenv("DYOPS_OFFLINE_MODE", raising=False)
+    monkeypatch.delenv("DYOPS_FEED_DISABLED", raising=False)
     monkeypatch.delenv("DYOPS_WEBHOOK_URLS", raising=False)
     monkeypatch.delenv("DYOPS_INSTRUMENT_ID", raising=False)
     monkeypatch.delenv("DYOPS_INSTRUMENTS", raising=False)
@@ -80,6 +81,8 @@ def client(
         api._processing_error_count = 0
         api._last_ingest_log_at.clear()
         api._demo_injection_active = False
+        api._gemini_auditor = None
+        api._gemini_last_error = None
 
         pump = asyncio.create_task(api._telemetry_pump())
         try:
@@ -99,6 +102,8 @@ def client(
             api._session_event_count = 0
             api._last_tick_monotonic = 0.0
             api._demo_injection_active = False
+            api._gemini_auditor = None
+            api._gemini_last_error = None
             _drain_telemetry_queue()
 
     monkeypatch.setattr(api.app.router, "lifespan_context", test_lifespan)
@@ -136,6 +141,11 @@ def test_status_uses_sentinel_breach_threshold(client: TestClient) -> None:
     assert response.json()["replay_window_events"] == api.REPLAY_WINDOW_EVENTS
     assert response.json()["offline_mode"] is False
     assert response.json()["feed_source"] == "binance_market"
+    assert response.json()["feed_disabled"] is False
+    assert response.json()["gemini_configured"] is False
+    assert response.json()["gemini_ready"] is False
+    assert response.json()["gemini_last_error"] is None
+    assert response.json()["software_version"] == api.SOFTWARE_VERSION
 
 
 def test_instruments_and_scoped_history(
@@ -449,8 +459,13 @@ def test_demo_webhooks_require_explicit_opt_in(
     assert scheduled[-1]["ingestion_source"] == "demo"
 
 
-def test_offline_feed_is_deterministic_and_network_free() -> None:
-    from binance_feed import start_offline_feed_threads
+def test_offline_feed_is_deterministic_and_network_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from binance_feed import (
+        start_configured_feed_threads,
+        start_offline_feed_threads,
+    )
 
     output: queue.Queue = queue.Queue()
     stop = threading.Event()
@@ -469,3 +484,73 @@ def test_offline_feed_is_deterministic_and_network_free() -> None:
     assert first[0] == "offline"
     assert first[4] == "offline"
     assert second[2:] != first[2:]
+
+    monkeypatch.setenv("DYOPS_BINANCE_FEED", "none")
+    assert (
+        start_configured_feed_threads(
+            queue.Queue(),
+            threading.Event(),
+            [("disabled", "stable", "USD", "USDCUSDT")],
+        )
+        == []
+    )
+
+
+def test_feed_disabled_is_stale_but_injection_still_escalates(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scenarios.base import Scenario
+
+    scenario = Scenario(
+        name="sudden_depeg",
+        description="feed-off escalation fixture",
+        timestamps=[float(index) for index in range(40)],
+        physical_price=[100.0] * 40,
+        token_price=[100.0] * 20 + [90.0] * 20,
+        expected_outcomes={"shock_tick": 99},
+    )
+    monkeypatch.setattr(api, "get_scenario", lambda *_, **__: scenario)
+    monkeypatch.setenv("DYOPS_FEED_DISABLED", "1")
+    monkeypatch.setenv("DYOPS_DEMO_INJECT", "1")
+    monkeypatch.setenv("DYOPS_DEMO_SECRET", "feed-off-secret")
+
+    status = client.get("/api/status").json()
+    assert status["feed_disabled"] is True
+    assert status["feed_source"] == "feed_disabled"
+    assert client.get("/api/pulse").json()["live"] is False
+
+    response = client.post(
+        "/api/demo/inject_scenario",
+        headers={"X-Dyops-Demo-Secret": "feed-off-secret"},
+    )
+    assert response.status_code == 202
+    _wait_for_persisted_events(client, 40)
+
+    trace = client.get("/api/history/trace?limit=40").json()
+    assert any(
+        point["mahalanobis"] > sentinel.MAHALANOBIS_BREACH
+        for point in trace["points"]
+    )
+    assert api._instrument_runtimes["default"].level == "AUDIT"
+
+
+def test_gemini_status_separates_key_presence_from_local_initialization(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("GEMINI_API_KEY", "present-but-not-contacted")
+    api._gemini_auditor = None
+    api._gemini_last_error = "local initialization failed"
+
+    not_ready = client.get("/api/status").json()
+    assert not_ready["gemini_configured"] is True
+    assert not_ready["gemini_ready"] is False
+    assert not_ready["gemini_last_error"] == "local initialization failed"
+
+    api._gemini_auditor = object()  # type: ignore[assignment]
+    api._gemini_last_error = None
+    initialized = client.get("/api/status").json()
+    assert initialized["gemini_configured"] is True
+    assert initialized["gemini_ready"] is True
+    assert initialized["gemini_last_error"] is None

@@ -85,11 +85,12 @@ fixture is synthetic and does not establish real-market superiority.
 ## Fast evaluation
 
 ```bash
-docker compose build
-docker compose down -v
-./scripts/demo.sh offline
+./scripts/demo_local.sh offline
 ```
 
-Open `http://localhost:8080`, inject the sudden-depeg scenario, review **Incidents**,
+Open `http://127.0.0.1:5173`, inject the sudden-depeg scenario, review **Incidents**,
 and export JSON. See [`DEMO_RUNBOOK.md`](DEMO_RUNBOOK.md) for the complete 8–10 minute
 presenter sequence.
+
+Docker Compose remains an optional packaging path. The engine and deterministic demo
+run natively without Docker or market-network access.

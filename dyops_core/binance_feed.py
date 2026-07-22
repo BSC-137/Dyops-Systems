@@ -21,6 +21,8 @@ import websockets
 from loguru import logger
 
 FeedMode = Literal["stable", "lst"]
+_DISABLED_FEED_VALUES = {"off", "none", "disabled"}
+_TRUE_VALUES = {"1", "true", "yes", "on"}
 
 BINANCE_WS_SINGLE = "wss://stream.binance.com:9443/ws/{}"
 BINANCE_WS_COMBINED = "wss://stream.binance.com:9443/stream?streams={}"
@@ -313,6 +315,42 @@ def start_offline_feed_threads(
         thread.start()
         threads.append(thread)
     return threads
+
+
+def feed_threads_disabled() -> bool:
+    """Return whether all automatic feed producers are explicitly disabled."""
+    disabled_flag = os.environ.get("DYOPS_FEED_DISABLED", "").strip().lower()
+    feed_name = os.environ.get("DYOPS_BINANCE_FEED", "").strip().lower()
+    return disabled_flag in _TRUE_VALUES or feed_name in _DISABLED_FEED_VALUES
+
+
+def start_configured_feed_threads(
+    out_q: "queue.Queue",
+    stop: threading.Event,
+    instruments: Iterable[tuple[str, FeedMode, str, str]],
+) -> list[threading.Thread]:
+    """Start disabled, deterministic offline, or Binance producers from environment."""
+    instrument_specs = tuple(instruments)
+    if feed_threads_disabled():
+        logger.info(
+            "Automatic feed threads disabled; API remains available for demo injection"
+        )
+        return []
+    if os.environ.get("DYOPS_OFFLINE_MODE") == "1":
+        try:
+            interval = float(os.environ.get("DYOPS_OFFLINE_INTERVAL_SEC", "0.25"))
+        except ValueError:
+            interval = 0.25
+            logger.warning(
+                "Invalid DYOPS_OFFLINE_INTERVAL_SEC; using deterministic default 0.25s"
+            )
+        return start_offline_feed_threads(
+            out_q,
+            stop,
+            instrument_specs,
+            interval_sec=max(0.05, interval),
+        )
+    return start_instrument_feed_threads(out_q, stop, instrument_specs)
 
 
 def resolve_feed_mode() -> FeedMode:

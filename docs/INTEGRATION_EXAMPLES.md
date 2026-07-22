@@ -18,8 +18,9 @@ curl -sS 'http://localhost:8000/api/history/trace?limit=5' | python3 -m json.too
 ```
 
 Status distinguishes `feed_source` (`binance_market` or
-`offline_deterministic`) and reports whether demo injection, webhooks, persistence,
-and Gemini configuration are available.
+`offline_deterministic`; `feed_disabled` when no producer threads start) and reports
+whether demo injection, webhooks, persistence, and Gemini key/local initialization
+are available. `gemini_ready` is not an endpoint reachability probe.
 
 ## Telemetry WebSocket
 
@@ -137,5 +138,8 @@ Demo webhooks are disabled by default. Production/live webhook behavior is unaff
 ## Incident export
 
 The React **Export JSON** action produces an unsigned forensic bundle containing source
-labels, scenario names, deterministic trace points, and matching optional audit rows.
+labels, scenario names, software/schema version, deterministic trace points, and a
+separate optional-LLM section. `content_sha256` covers canonical JSON without the hash
+field when Web Crypto is available. It is comparison integrity, not a digital
+signature or legal seal.
 See [`../examples/incident-export.json`](../examples/incident-export.json).

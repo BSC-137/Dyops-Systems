@@ -31,10 +31,7 @@ if str(_DYOPS_PY) not in sys.path:
 
 import dyops_core  # noqa: E402
 from loguru import logger  # noqa: E402
-from binance_feed import (  # noqa: E402
-    start_instrument_feed_threads,
-    start_offline_feed_threads,
-)
+from binance_feed import feed_threads_disabled, start_configured_feed_threads  # noqa: E402
 from database import PersistenceManager, REPLAY_WINDOW_EVENTS  # noqa: E402
 from instruments import InstrumentConfig, load_instruments  # noqa: E402
 from scenarios import get_scenario  # noqa: E402
@@ -55,6 +52,7 @@ _PULSE_SUMMARY_MAX = 200
 _PULSE_EXPLAIN_MAX = 280
 STALE_CUTOFF_SEC = 12.0
 _INGEST_LOG_INTERVAL_SEC = 5.0
+SOFTWARE_VERSION = "1.0.0"
 
 
 def _clip_text(s: str, max_len: int) -> str:
@@ -310,6 +308,8 @@ _demo_resetting = False
 _webhook_tasks: set[asyncio.Task[None]] = set()
 _instrument_configs: tuple[InstrumentConfig, ...] = ()
 _primary_instrument_id = "default"
+_gemini_auditor: AgenticAuditor | None = None
+_gemini_last_error: str | None = None
 
 
 @dataclass
@@ -368,11 +368,13 @@ def _on_startup_sync() -> dict[str, InstrumentRuntime]:
     global _instrument_configs, _instrument_runtimes, _primary_instrument_id
     global _dropped_tick_count, _processing_error_count, _demo_injection_active
     global _demo_resetting
+    global _gemini_auditor
     db_path = os.environ.get("DYOPS_SQLITE_PATH")
     _persistence = PersistenceManager(db_path)
     _instrument_configs = load_instruments()
     _primary_instrument_id = _instrument_configs[0].id
     auditor = _try_create_auditor(_persistence)
+    _gemini_auditor = auditor
     _instrument_runtimes = {}
     for config in _instrument_configs:
         observer = _replay_observer_state(_persistence, config.id)
@@ -400,38 +402,38 @@ def _on_startup_sync() -> dict[str, InstrumentRuntime]:
         )
         for config in _instrument_configs
     )
-    if os.environ.get("DYOPS_OFFLINE_MODE") == "1":
-        interval = float(os.environ.get("DYOPS_OFFLINE_INTERVAL_SEC", "0.25"))
-        _binance_threads = start_offline_feed_threads(
-            _telemetry_queue,
-            _stop_binance,
-            feed_specs,
-            interval_sec=max(0.05, interval),
-        )
-    else:
-        _binance_threads = start_instrument_feed_threads(
-            _telemetry_queue,
-            _stop_binance,
-            feed_specs,
-        )
+    _binance_threads = start_configured_feed_threads(
+        _telemetry_queue,
+        _stop_binance,
+        feed_specs,
+    )
     return _instrument_runtimes
 
 
 def _try_create_auditor(persistence: PersistenceManager) -> AgenticAuditor | None:
+    global _gemini_last_error
     if not (os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")):
+        _gemini_last_error = None
         return None
     try:
-        return AgenticAuditor(persistence=persistence, audits_dir=AUDITS_DIR)
-    except (ImportError, ValueError):
+        auditor = AgenticAuditor(persistence=persistence, audits_dir=AUDITS_DIR)
+        _gemini_last_error = None
+        return auditor
+    except (ImportError, ValueError) as exc:
+        _gemini_last_error = str(exc)
+        logger.warning("Gemini auditor initialization failed: {}", exc)
         return None
 
 
 def _on_shutdown_sync() -> None:
-    global _binance_threads
+    global _binance_threads, _gemini_auditor
     _stop_binance.set()
+    for thread in _binance_threads:
+        thread.join(timeout=2.0)
     if _persistence is not None:
         _persistence.close()
     _binance_threads = []
+    _gemini_auditor = None
 
 
 async def _send_escalation_webhook(
@@ -649,7 +651,7 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Dyops API",
-    version="1.0.0",
+    version=SOFTWARE_VERSION,
     description=(
         "High-fidelity telemetry API for monitoring digital asset basis risk and peg stability."
     ),
@@ -671,6 +673,8 @@ app.add_middleware(
 
 class StatusResponse(BaseModel):
     gemini_configured: bool
+    gemini_ready: bool
+    gemini_last_error: str | None
     webhook_configured: bool
     binance_feed: str
     audits_dir: str
@@ -694,6 +698,8 @@ class StatusResponse(BaseModel):
     offline_mode: bool
     feed_source: str
     demo_webhooks_enabled: bool
+    feed_disabled: bool
+    software_version: str
 
 
 class InstrumentResponse(BaseModel):
@@ -756,6 +762,8 @@ async def api_status() -> StatusResponse:
     gem = bool(os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY"))
     return StatusResponse(
         gemini_configured=gem,
+        gemini_ready=_gemini_auditor is not None,
+        gemini_last_error=_gemini_last_error,
         webhook_configured=bool(webhooks.configured_urls()),
         binance_feed=(
             _instrument_configs[0].feed_mode
@@ -785,11 +793,17 @@ async def api_status() -> StatusResponse:
         replay_window_events=REPLAY_WINDOW_EVENTS,
         offline_mode=os.environ.get("DYOPS_OFFLINE_MODE") == "1",
         feed_source=(
-            "offline_deterministic"
-            if os.environ.get("DYOPS_OFFLINE_MODE") == "1"
-            else "binance_market"
+            "feed_disabled"
+            if feed_threads_disabled()
+            else (
+                "offline_deterministic"
+                if os.environ.get("DYOPS_OFFLINE_MODE") == "1"
+                else "binance_market"
+            )
         ),
         demo_webhooks_enabled=os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1",
+        feed_disabled=feed_threads_disabled(),
+        software_version=SOFTWARE_VERSION,
     )
 
 

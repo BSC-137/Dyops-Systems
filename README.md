@@ -35,7 +35,10 @@ lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 - **Persists** ticks and audits to **SQLite** through a background writer (**`PersistenceManager`**).
 - **Streams** live telemetry and audit tails over **`/ws/telemetry`** and **`/ws/audits`**; **replay** aligns observer state from stored events on startup.
 - **Explainability:** **`GET /api/pulse`** exposes short **`summary`** / **`explainability`** strings; **`GET /api/history/trace`** returns window copy plus deterministic per-tick **`reasoning`** (no LLM — **Gemini does not populate this**).
-- **Optional narrative audits:** **`AgenticAuditor`** (Gemini) when API keys are set — structured JSON (+ SQLite rows), surfaced in the React **Structural Drift Audit** column when configured.
+- **Optional narrative audits:** `AgenticAuditor` (Gemini) when a key is set and the
+  local client initializes. `/api/status` separates key presence from local readiness;
+  neither field claims endpoint reachability. Narratives, when produced, appear in
+  **Incidents** and never determine classification.
 
 **Boundary (read this once):** Dyops is **not** a regulated attestation service, SOC2-certified control, or substitute for legal/compliance sign-off. Deterministic **`reasoning`** on replay is **operational evidence-grade trace** (what the model saw and how it was classified) — **not** “regulatory proof” or legal advice.
 
@@ -43,7 +46,38 @@ lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 
 ## 8–10 Minute Partner Evaluation
 
-Cold start → confirm value in three acts. **Ports:** API **8000**, Vite **5173** (proxies `/api` and `/ws` to the API).
+Cold start → confirm value in three acts. **Docker is packaging; the engine runs
+without it.**
+
+### WSL / local default (no Docker)
+
+After the one-time native build below, run:
+
+```bash
+./scripts/demo_local.sh offline
+```
+
+This supervises FastAPI and Vite, enables guarded demo injection, and prints the UI
+(`http://127.0.0.1:5173`), OpenAPI, secret, reset, and injection commands. It does not
+need Docker or Binance. Use `./scripts/demo_local.sh feed-off` to rehearse a genuinely
+STALE pulse before injecting, or `./scripts/demo_local.sh live` only when Binance is
+available.
+
+If you prefer two terminals, the equivalent commands are:
+
+```bash
+DYOPS_OFFLINE_MODE=1 DYOPS_DEMO_INJECT=1 \
+DYOPS_DEMO_SECRET=dyops-local-demo \
+PYTHONPATH="$PWD:$PWD/dyops_core" \
+dyops_core/.venv/bin/python -m uvicorn backend.main:app \
+  --host 127.0.0.1 --port 8000
+```
+
+```bash
+cd frontend && npm run dev -- --host 127.0.0.1
+```
+
+**Ports:** API **8000**, local Vite **5173**, Docker UI **8080**.
 
 ### Cold start (copy-paste)
 
@@ -120,6 +154,8 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
   and compact Structural Drift Audit summary.
 - **When Gemini is OFFLINE:** incident windows and `/api/history/trace` remain fully
   deterministic; optional LLM narrative is additive.
+- **Injected scenarios intentionally suppress Gemini background work:** the partner
+  narrative is deterministic classification and replay, not an expected LLM card.
 - **Integration:** show OpenAPI, the telemetry WebSocket, exported incident JSON, and
   the local webhook receiver. Injected webhooks require explicit demo opt-in.
 
@@ -337,6 +373,14 @@ probability. Invalid measurements get a withheld-measurement explanation.
 
 - Three tabs: **Live** (full-width telemetry chart), **Incidents** (forensic windows
   and exports), and **Instruments** (feed/runtime overview).
+- Incidents and Instruments are lazy-loaded tab chunks. The measured production build
+  moved the entry chunk from **606.36 kB / 181.48 kB gzip** to
+  **598.20 kB / 180.23 kB gzip**, plus 8.82 kB and 3.17 kB tab chunks.
+- The remaining Vite `>500 kB` warning is intentionally visible. Live loads Recharts
+  immediately and remains vendor/chart dominated; named Recharts imports already
+  permit tree-shaking. The accepted current entry budget is **620 kB minified /
+  185 kB gzip**. This pass does not disguise the warning or restructure the reference
+  UI solely for bundle vanity.
 
 ---
 
@@ -344,7 +388,7 @@ probability. Invalid measurements get a withheld-measurement explanation.
 
 | Variable | Purpose |
 |----------|---------|
-| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Enables **`AgenticAuditor`** when valid (optional) |
+| `GEMINI_API_KEY` or `GOOGLE_API_KEY` | Marks Gemini as key-configured; `gemini_ready` separately reports local auditor initialization, not endpoint reachability |
 | `DYOPS_GEMINI_MODEL` | Gemini model id (default `gemini-3-flash`) |
 | `DYOPS_SQLITE_PATH` | Override SQLite file path (default next to `database.py` in `dyops_core/`) |
 | `DYOPS_BINANCE_FEED` | `stable` (default) vs LST aliases (`lst`, `steth`, …) |
@@ -356,12 +400,13 @@ probability. Invalid measurements get a withheld-measurement explanation.
 | `DYOPS_DEMO_INJECT` | Set to `1` only for an explicit demo; disabled by default |
 | `DYOPS_DEMO_SECRET` | Shared secret required in `X-Dyops-Demo-Secret` for demo injection |
 | `DYOPS_OFFLINE_MODE` | Set to `1` for a deterministic current feed with no external network |
+| `DYOPS_FEED_DISABLED` | Set to `1` to start no automatic feed threads; pulse remains STALE until injection/input (`DYOPS_BINANCE_FEED=off|none|disabled` is equivalent) |
 | `DYOPS_OFFLINE_INTERVAL_SEC` | Offline heartbeat cadence (default `0.25`) |
 | `DYOPS_DEMO_WEBHOOKS` | Explicitly allow simulated scenario webhooks; disabled by default |
 
 ---
 
-### Partner cold start — Docker (primary)
+### Partner packaging path — Docker Compose
 
 The supported partner demo path builds the Rust extension in release mode, runs the FastAPI service, and serves the production React bundle through nginx:
 
@@ -543,6 +588,10 @@ This integration uses plain HTTP webhooks through `httpx`; it does not require a
   escalations call webhooks only under explicit `DYOPS_DEMO_WEBHOOKS=1`.
 - **Chart vs trace**: the UI refreshes forensic trace after demo injection and
   escalation events so incident copy does not lag the live chart.
+- **Incident export**: schema `2.0` separates deterministic replay from optional LLM
+  rows and records source, software version, client-clock export time, and explicit
+  unsigned/non-attestation metadata. Browser SHA-256 is comparison integrity only,
+  not a signature or legal seal.
 
 ---
 

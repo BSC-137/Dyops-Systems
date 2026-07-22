@@ -44,6 +44,8 @@ export interface PulseResponse {
 /** GET /api/status */
 export interface StatusResponse {
   gemini_configured: boolean
+  gemini_ready: boolean
+  gemini_last_error: string | null
   webhook_configured?: boolean
   binance_feed: string
   audits_dir: string
@@ -65,8 +67,10 @@ export interface StatusResponse {
   stale_cutoff_sec: number
   replay_window_events: number
   offline_mode: boolean
-  feed_source: "binance_market" | "offline_deterministic"
+  feed_source: "binance_market" | "offline_deterministic" | "feed_disabled"
   demo_webhooks_enabled: boolean
+  feed_disabled: boolean
+  software_version: string
 }
 
 /** GET /api/history/trace */

@@ -19,7 +19,8 @@ case "$MODE" in
 esac
 
 command -v docker >/dev/null 2>&1 || {
-  printf 'Docker is required. Install Docker Engine/Desktop with Compose support.\n' >&2
+  printf 'Docker is unavailable. Use: ./scripts/demo_local.sh offline\n' >&2
+  printf 'Docker is packaging; the engine runs without it.\n' >&2
   exit 1
 }
 docker compose version >/dev/null 2>&1 || {

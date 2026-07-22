@@ -132,6 +132,20 @@ structured risk assessment. That model output can vary and is not part of scenar
 pass/fail status. The deterministic MONITORING, BREACH, and AUDIT classification does
 not depend on Gemini.
 
+`gemini_configured` means an API key is present. `gemini_ready` means only that the
+local auditor client initialized; neither field proves endpoint reachability. Injected
+demo scenarios suppress Gemini background dispatch so the deterministic demo does not
+promise an optional narrative.
+
+## Forensic export boundary
+
+The React incident export is assembled from deterministic replay points and optional
+stored LLM rows. It includes source labels, software/schema version, client export
+time, and an explicit non-attestation notice. When browser Web Crypto is available,
+`content_sha256` covers canonical JSON excluding the digest field. This supports later
+byte-content comparison; it is not identity authentication, a digital signature,
+certification, or a legal seal.
+
 ## Explicit non-claims
 
 This evidence pack is engineering validation against synthetic scenarios. It is not:

@@ -2,12 +2,13 @@ import { Download } from "lucide-react"
 import { useEffect, useMemo, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  buildIncidentExport,
+  downloadIncidentExport,
+  FORENSIC_NON_CLAIM,
+} from "@/lib/incidentExport"
 import { deriveIncidentWindows, incidentSummary } from "@/lib/incidents"
-import type {
-  AuditRow,
-  HistoryTraceBundle,
-  IncidentWindow,
-} from "@/types/telemetry"
+import type { AuditRow, HistoryTraceBundle } from "@/types/telemetry"
 
 type IncidentsTabProps = {
   instrumentId: string
@@ -16,6 +17,7 @@ type IncidentsTabProps = {
   breachThreshold: number
   criticalityWindowEvents: number
   criticalityAuditPct: number
+  softwareVersion: string
 }
 
 function formatTime(timestamp: number, includeDate = false): string {
@@ -35,50 +37,6 @@ function formatTime(timestamp: number, includeDate = false): string {
       })
 }
 
-function exportIncident(
-  instrumentId: string,
-  incident: IncidentWindow,
-  points: HistoryTraceBundle["points"],
-  breachThreshold: number,
-) {
-  const payload = {
-    artifact_type: "dyops_incident_export",
-    artifact_version: 1,
-    exported_at: new Date().toISOString(),
-    instrument_id: instrumentId,
-    data_sources: Array.from(new Set(points.map((point) => point.ingestion_source))),
-    scenarios: Array.from(
-      new Set(
-        points
-          .map((point) => point.scenario)
-          .filter((scenario): scenario is string => Boolean(scenario)),
-      ),
-    ),
-    reasoning_source: "deterministic_replay",
-    incident: {
-      id: incident.id,
-      kind: incident.kind,
-      start_timestamp: incident.startT,
-      end_timestamp: incident.endT,
-      tick_count: incident.tickCount,
-      peak_mahalanobis: incident.peakMahalanobis,
-      criticality_peak_pct: incident.criticalityPeakPct,
-    },
-    summary: incidentSummary(incident, points, breachThreshold),
-    audits: incident.audits,
-    points,
-  }
-  const blob = new Blob([JSON.stringify(payload, null, 2)], {
-    type: "application/json",
-  })
-  const url = URL.createObjectURL(blob)
-  const link = document.createElement("a")
-  link.href = url
-  link.download = `dyops-${incident.kind.toLowerCase()}-${Math.round(incident.startT)}.json`
-  link.click()
-  URL.revokeObjectURL(url)
-}
-
 export function IncidentsTab({
   instrumentId,
   trace,
@@ -86,6 +44,7 @@ export function IncidentsTab({
   breachThreshold,
   criticalityWindowEvents,
   criticalityAuditPct,
+  softwareVersion,
 }: IncidentsTabProps) {
   const incidents = useMemo(
     () =>
@@ -226,19 +185,25 @@ export function IncidentsTab({
                 </div>
                 <button
                   type="button"
-                  onClick={() =>
-                    exportIncident(
+                  onClick={() => {
+                    void buildIncidentExport(
                       instrumentId,
+                      softwareVersion,
                       selected,
                       selectedPoints,
                       breachThreshold,
-                    )
-                  }
+                    ).then(downloadIncidentExport)
+                  }}
                   className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 font-mono-nums text-[10px] uppercase tracking-wide text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
                 >
                   <Download className="size-3" aria-hidden />
                   Export JSON
                 </button>
+              </div>
+
+              <div className="border-b border-amber-950/70 bg-amber-950/10 px-5 py-2 font-mono-nums text-[10px] leading-relaxed text-amber-200/60">
+                {FORENSIC_NON_CLAIM} Optional SHA-256 is comparison
+                integrity only, not a signature.
               </div>
 
               {selected.audits.length > 0 ? (
