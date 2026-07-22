@@ -13,6 +13,9 @@ Partners typically embed monitoring **behind their own UX** (treasury, neo-bank 
 Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/README.md).
 The measurement, escalation, and validation boundaries are documented in
 [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
+The vendor-neutral comparative harness, dataset contract, leakage controls, and
+historical-evidence boundary are documented in
+[`docs/HISTORICAL_EVALUATION.md`](docs/HISTORICAL_EVALUATION.md).
 
 **CI runs Rust tests, deterministic scenarios, Python/backend tests, frontend
 lint/build, and a Docker Compose smoke test on every pull request to `main`.**
@@ -562,6 +565,20 @@ virtual environment active:
 ```bash
 python scripts/generate_robustness_report.py
 ```
+
+Run the historical-comparison harness on the committed legal synthetic fixture:
+
+```bash
+cd dyops_core
+python -m historical_eval.cli evaluate \
+  --dataset historical_eval/fixtures/synthetic_reference.csv \
+  --catalog historical_eval/manifests/synthetic_reference.events.json \
+  --json-output ../reports/historical_evaluation.json \
+  --markdown-output ../reports/historical_evaluation.md
+```
+
+This fixture validates the harness only. It is not historical market evidence and
+must not be used to claim real-world superiority over the included baselines.
 
 Partner evidence pack: [`reports/robustness_report.md`](reports/robustness_report.md).
 

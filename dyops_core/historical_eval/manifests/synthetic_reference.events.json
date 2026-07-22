@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "catalog_id": "dyops-synthetic-reference-events-v1",
+  "dataset_id": "dyops-synthetic-reference-v1",
+  "limitations": [
+    "All rows and labels are generated synthetic fixtures for legal regression testing.",
+    "The slow-drift onset is intentionally approximate and carries a two-minute uncertainty.",
+    "The data-gap label identifies an absent sample; no detector can alert during a timestamp that is not observed.",
+    "This catalog must not be described as historical market evidence."
+  ],
+  "events": [
+    {
+      "event_id": "tuning-stable-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 0,
+      "end_timestamp": 540,
+      "category": "stable",
+      "split": "tuning",
+      "provenance": "Deterministic fixture construction; near-parity prices.",
+      "uncertainty_sec": 0,
+      "confidence": "high",
+      "notes": "Negative-control period used only for calibration."
+    },
+    {
+      "event_id": "tuning-oracle-failure-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 600,
+      "end_timestamp": 900,
+      "category": "oracle_failure",
+      "split": "tuning",
+      "provenance": "Deterministic alternating token-price fixture.",
+      "uncertainty_sec": 0,
+      "confidence": "high",
+      "notes": "Synthetic operational noise, not a market event."
+    },
+    {
+      "event_id": "tuning-data-gap-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 1020,
+      "end_timestamp": 1140,
+      "category": "data_failure",
+      "split": "tuning",
+      "provenance": "Timestamp 1080 deliberately omitted from the fixture.",
+      "uncertainty_sec": 0,
+      "confidence": "high",
+      "notes": "Demonstrates source-gap validation; ground truth is fixture-defined."
+    },
+    {
+      "event_id": "tuning-dislocation-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 1200,
+      "end_timestamp": 1740,
+      "category": "dislocation",
+      "split": "tuning",
+      "provenance": "Deterministic one-percent token-price step.",
+      "uncertainty_sec": 0,
+      "confidence": "high",
+      "notes": "Used for parameter selection; excluded from reported held-out metrics."
+    },
+    {
+      "event_id": "tuning-recovery-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 1800,
+      "end_timestamp": 2340,
+      "category": "recovery",
+      "split": "tuning",
+      "provenance": "Deterministic return from the tuning step.",
+      "uncertainty_sec": 0,
+      "confidence": "high"
+    },
+    {
+      "event_id": "heldout-stable-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 2400,
+      "end_timestamp": 2940,
+      "category": "stable",
+      "split": "held_out",
+      "provenance": "Deterministic fixture construction; unseen by calibration.",
+      "uncertainty_sec": 0,
+      "confidence": "high"
+    },
+    {
+      "event_id": "heldout-slow-drift-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 3000,
+      "end_timestamp": 3540,
+      "category": "dislocation",
+      "split": "held_out",
+      "provenance": "Generated monotonic token-price drift; onset treated as approximate.",
+      "uncertainty_sec": 120,
+      "confidence": "medium",
+      "notes": "The exact operational onset is intentionally not asserted."
+    },
+    {
+      "event_id": "heldout-dislocation-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 3600,
+      "end_timestamp": 4140,
+      "category": "dislocation",
+      "split": "held_out",
+      "provenance": "Deterministic two-percent token-price step; unseen by calibration.",
+      "uncertainty_sec": 0,
+      "confidence": "high"
+    },
+    {
+      "event_id": "heldout-recovery-01",
+      "instrument_id": "synthetic-usd",
+      "start_timestamp": 4200,
+      "end_timestamp": 4740,
+      "category": "recovery",
+      "split": "held_out",
+      "provenance": "Deterministic post-step recovery; unseen by calibration.",
+      "uncertainty_sec": 60,
+      "confidence": "medium",
+      "notes": "Recovery endpoint is approximate within one sample."
+    }
+  ]
+}

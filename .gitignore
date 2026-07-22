@@ -9,4 +9,7 @@ target/
 *.db
 audits/*.json
 reports/robustness_report.json
+reports/historical_evaluation.json
+dyops_core/historical_eval/datasets/raw/
+dyops_core/historical_eval/manifests/private/
 .env

@@ -15,4 +15,7 @@ dependencies = [
     "websockets>=13.0",
 ]
 
+[project.optional-dependencies]
+historical-parquet = ["pyarrow>=16.0"]
+
 [tool.maturin]
