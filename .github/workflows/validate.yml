@@ -124,10 +124,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Build and start stack
+      - name: Build images
         env:
           DYOPS_DEMO_INJECT: "0"
-        run: docker compose up --build -d
+        run: docker compose build
+
+      - name: Start stack
+        env:
+          DYOPS_DEMO_INJECT: "0"
+        run: docker compose up -d
 
       - name: Wait for API and verify safe status
         run: |
@@ -149,7 +154,13 @@ jobs:
 
       - name: Show logs on failure
         if: failure()
-        run: docker compose logs
+        run: |
+          echo "::group::docker compose ps"
+          docker compose ps -a || true
+          echo "::endgroup::"
+          echo "::group::docker compose logs"
+          docker compose logs || true
+          echo "::endgroup::"
 
       - name: Stop stack
         if: always()

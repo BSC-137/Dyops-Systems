@@ -14,6 +14,7 @@ RUN apt-get update \
 WORKDIR /build/dyops_core
 COPY dyops_core/Cargo.toml dyops_core/Cargo.lock dyops_core/pyproject.toml ./
 COPY dyops_core/src ./src
+COPY dyops_core/benches ./benches
 RUN maturin build --release --out /wheels
 
 
