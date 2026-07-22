@@ -263,6 +263,58 @@ def start_instrument_feed_threads(
     return threads
 
 
+def _offline_thread_target(
+    out_q: "queue.Queue",
+    stop: threading.Event,
+    instrument_id: str,
+    mode: FeedMode,
+    interval_sec: float,
+) -> None:
+    """Emit deterministic healthy telemetry without network access."""
+    tick = 0
+    phase = sum(ord(char) for char in instrument_id) % 17
+    while not stop.is_set():
+        angle = (tick + phase) * 0.17
+        if mode == "stable":
+            physical = 1.0
+            token = 1.0 + 0.00003 * math.sin(angle)
+        else:
+            physical = 2000.0 + 2.0 * math.sin(angle)
+            token = physical * (0.9995 + 0.00002 * math.cos(angle))
+        out_q.put_nowait(
+            (
+                instrument_id,
+                time.time(),
+                physical,
+                token,
+                "offline",
+            )
+        )
+        tick += 1
+        stop.wait(interval_sec)
+
+
+def start_offline_feed_threads(
+    out_q: "queue.Queue",
+    stop: threading.Event,
+    instruments: Iterable[tuple[str, FeedMode, str, str]],
+    *,
+    interval_sec: float = 0.25,
+) -> list[threading.Thread]:
+    """Start deterministic, continuously current demo feeds with no external I/O."""
+    threads: list[threading.Thread] = []
+    for instrument_id, mode, _, _ in instruments:
+        thread = threading.Thread(
+            target=_offline_thread_target,
+            args=(out_q, stop, instrument_id, mode, interval_sec),
+            name=f"dyops-offline-{instrument_id}",
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
 def resolve_feed_mode() -> FeedMode:
     raw = os.environ.get("DYOPS_BINANCE_FEED", "stable").strip().lower()
     return "lst" if raw in ("lst", "steth", "eth", "steth/eth") else "stable"

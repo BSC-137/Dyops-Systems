@@ -182,3 +182,35 @@ def test_startup_replay_matches_full_forensic_window_over_500_events(
         expected.mahalanobis_distance,
         abs=1e-12,
     )
+
+
+def test_source_metadata_and_instrument_reset_are_durable(tmp_path: Path) -> None:
+    persistence = PersistenceManager(tmp_path / "source-reset.db")
+    persistence.schedule_event(
+        1.0,
+        100.0,
+        99.0,
+        instrument_id="default",
+        innovation=0.1,
+        mahalanobis_distance=4.0,
+        ingestion_source="demo",
+        scenario="sudden_depeg",
+    )
+    persistence.schedule_event(
+        1.0,
+        2000.0,
+        1999.0,
+        instrument_id="lst",
+        innovation=0.0,
+        mahalanobis_distance=0.0,
+        ingestion_source="live",
+    )
+
+    persistence.reset_instrument("default")
+
+    assert persistence.load_recent_events(10, instrument_id="default") == []
+    lst = persistence.load_recent_events(10, instrument_id="lst")
+    persistence.close()
+    assert len(lst) == 1
+    assert lst[0]["ingestion_source"] == "live"
+    assert lst[0]["scenario"] is None

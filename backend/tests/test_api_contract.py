@@ -40,6 +40,9 @@ def client(
     monkeypatch.delenv("GEMINI_API_KEY", raising=False)
     monkeypatch.delenv("GOOGLE_API_KEY", raising=False)
     monkeypatch.delenv("DYOPS_DEMO_INJECT", raising=False)
+    monkeypatch.delenv("DYOPS_DEMO_SECRET", raising=False)
+    monkeypatch.delenv("DYOPS_DEMO_WEBHOOKS", raising=False)
+    monkeypatch.delenv("DYOPS_OFFLINE_MODE", raising=False)
     monkeypatch.delenv("DYOPS_WEBHOOK_URLS", raising=False)
     monkeypatch.delenv("DYOPS_INSTRUMENT_ID", raising=False)
     monkeypatch.delenv("DYOPS_INSTRUMENTS", raising=False)
@@ -131,6 +134,8 @@ def test_status_uses_sentinel_breach_threshold(client: TestClient) -> None:
     assert response.json()["telemetry_queue_depth"] >= 0
     assert response.json()["dropped_tick_count"] == 0
     assert response.json()["replay_window_events"] == api.REPLAY_WINDOW_EVENTS
+    assert response.json()["offline_mode"] is False
+    assert response.json()["feed_source"] == "binance_market"
 
 
 def test_instruments_and_scoped_history(
@@ -177,6 +182,7 @@ def test_instruments_and_scoped_history(
     lst_history = client.get("/api/history", params={"instrument": "lst"})
     assert {row["instrument_id"] for row in default_history.json()} == {"default"}
     assert {row["instrument_id"] for row in lst_history.json()} == {"lst"}
+    assert {row["ingestion_source"] for row in default_history.json()} == {"live"}
     assert client.get("/api/pulse", params={"instrument": "lst"}).json()[
         "events_session"
     ] == 1
@@ -370,3 +376,96 @@ def test_ingestion_errors_and_drops_are_counted(client: TestClient) -> None:
             break
         time.sleep(0.01)
     assert client.get("/api/status").json()["processing_error_count"] == 1
+
+
+def test_demo_can_reset_and_run_twice(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scenarios.base import Scenario
+
+    scenario = Scenario(
+        name="sudden_depeg",
+        description="short contract fixture",
+        timestamps=[0.0, 1.0, 2.0],
+        physical_price=[100.0, 100.0, 100.0],
+        token_price=[100.0, 90.0, 90.0],
+        expected_outcomes={"shock_tick": 99},
+    )
+    monkeypatch.setattr(api, "get_scenario", lambda *_, **__: scenario)
+    monkeypatch.setenv("DYOPS_DEMO_INJECT", "1")
+    monkeypatch.setenv("DYOPS_DEMO_SECRET", "reset-secret")
+    headers = {"X-Dyops-Demo-Secret": "reset-secret"}
+
+    first = client.post("/api/demo/inject_scenario", headers=headers)
+    assert first.status_code == 202
+    _wait_for_persisted_events(client, 3)
+
+    reset = client.post("/api/demo/reset", headers=headers)
+    assert reset.status_code == 200
+    assert reset.json()["status"] == "reset"
+    assert client.get("/api/status").json()["global_events_total_sqlite"] == 0
+
+    second = client.post("/api/demo/inject_scenario", headers=headers)
+    assert second.status_code == 202
+    _wait_for_persisted_events(client, 3)
+
+
+def test_demo_webhooks_require_explicit_opt_in(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from scenarios.base import Scenario
+
+    scenario = Scenario(
+        name="sudden_depeg",
+        description="webhook contract fixture",
+        timestamps=[float(index) for index in range(32)],
+        physical_price=[100.0] * 32,
+        token_price=[100.0] * 31 + [90.0],
+        expected_outcomes={"shock_tick": 99},
+    )
+    scheduled: list[dict[str, object]] = []
+    monkeypatch.setattr(api, "get_scenario", lambda *_, **__: scenario)
+    monkeypatch.setattr(
+        api,
+        "_schedule_escalation_webhook",
+        lambda model, **_: scheduled.append(model),
+    )
+    monkeypatch.setenv("DYOPS_DEMO_INJECT", "1")
+    monkeypatch.setenv("DYOPS_DEMO_SECRET", "webhook-secret")
+    monkeypatch.setenv("DYOPS_DEMO_WEBHOOKS", "1")
+
+    response = client.post(
+        "/api/demo/inject_scenario",
+        headers={"X-Dyops-Demo-Secret": "webhook-secret"},
+    )
+    assert response.status_code == 202
+    _wait_for_persisted_events(client, 32)
+    deadline = time.monotonic() + 1.0
+    while not scheduled and time.monotonic() < deadline:
+        time.sleep(0.01)
+    assert scheduled
+    assert scheduled[-1]["ingestion_source"] == "demo"
+
+
+def test_offline_feed_is_deterministic_and_network_free() -> None:
+    from binance_feed import start_offline_feed_threads
+
+    output: queue.Queue = queue.Queue()
+    stop = threading.Event()
+    threads = start_offline_feed_threads(
+        output,
+        stop,
+        [("offline", "stable", "USD", "USDCUSDT")],
+        interval_sec=0.01,
+    )
+    first = output.get(timeout=1.0)
+    second = output.get(timeout=1.0)
+    stop.set()
+    for thread in threads:
+        thread.join(timeout=1.0)
+
+    assert first[0] == "offline"
+    assert first[4] == "offline"
+    assert second[2:] != first[2:]

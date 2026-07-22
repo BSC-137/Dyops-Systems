@@ -1,0 +1,50 @@
+{
+  "artifact_type": "dyops_incident_export",
+  "artifact_version": 1,
+  "exported_at": "2026-07-22T12:00:00.000Z",
+  "instrument_id": "default",
+  "data_sources": [
+    "demo"
+  ],
+  "scenarios": [
+    "sudden_depeg"
+  ],
+  "reasoning_source": "deterministic_replay",
+  "incident": {
+    "id": "breach-1753185600-1753185600.000001",
+    "kind": "BREACH",
+    "start_timestamp": 1753185600,
+    "end_timestamp": 1753185600.000001,
+    "tick_count": 2,
+    "peak_mahalanobis": 18.2793,
+    "criticality_peak_pct": 12.5
+  },
+  "summary": "BREACH window · 2 ticks · 2 breach moments · peak Mahalanobis 18.279",
+  "audits": [],
+  "points": [
+    {
+      "instrument_id": "default",
+      "ingestion_source": "demo",
+      "scenario": "sudden_depeg",
+      "t": 1753185600,
+      "measured_basis": 0.0202027,
+      "filtered_basis": 0.002901,
+      "innovation": 0.020101,
+      "mahalanobis": 18.2793,
+      "valid": true,
+      "reasoning": "Mahalanobis distance at 18.28 normalized units (509% above sentinel threshold). Correlation fracture detected."
+    },
+    {
+      "instrument_id": "default",
+      "ingestion_source": "demo",
+      "scenario": "sudden_depeg",
+      "t": 1753185600.000001,
+      "measured_basis": 0.0202027,
+      "filtered_basis": 0.005112,
+      "innovation": 0.017302,
+      "mahalanobis": 12.741,
+      "valid": true,
+      "reasoning": "Mahalanobis distance at 12.74 normalized units (325% above sentinel threshold). Correlation fracture detected."
+    }
+  ]
+}

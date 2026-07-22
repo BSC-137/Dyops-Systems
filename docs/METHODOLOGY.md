@@ -79,7 +79,11 @@ Transient side-effect state such as an in-flight webhook task is not replayed.
 Scenario injection is synthetic, disabled unless `DYOPS_DEMO_INJECT=1`, and protected
 by `DYOPS_DEMO_SECRET`. Injected WebSocket telemetry is additively labeled with
 `ingestion_source: "demo"` and `demo_scenario`; live events use
-`ingestion_source: "live"`. Demo events do not dispatch partner escalation webhooks.
+`ingestion_source: "live"`. The network-free deterministic heartbeat uses
+`ingestion_source: "offline"`. Source and scenario labels are persisted into forensic
+history. Simulated demo and offline events do not dispatch partner escalation webhooks
+unless the operator also sets `DYOPS_DEMO_WEBHOOKS=1`; that explicit option exists
+only for integration demonstrations.
 The deterministic scenario report remains separate from optional Gemini output and
 must not be presented as observed market evidence.
 

@@ -8,7 +8,7 @@ export interface TelemetryPayload {
   physical_price: number
   token_price: number
   session_event_index?: number
-  ingestion_source: "live" | "demo"
+  ingestion_source: "live" | "offline" | "demo"
   demo_scenario?: string
   health: {
     filtered_basis: number
@@ -38,6 +38,7 @@ export interface PulseResponse {
   events_total_sqlite: number
   summary?: string
   explainability?: string
+  ingestion_source: "live" | "offline" | "demo" | "none"
 }
 
 /** GET /api/status */
@@ -63,6 +64,9 @@ export interface StatusResponse {
   processing_error_count: number
   stale_cutoff_sec: number
   replay_window_events: number
+  offline_mode: boolean
+  feed_source: "binance_market" | "offline_deterministic"
+  demo_webhooks_enabled: boolean
 }
 
 /** GET /api/history/trace */
@@ -74,6 +78,8 @@ export interface HistoryTraceBundle {
 
 export interface HistoryTracePoint {
   instrument_id?: string
+  ingestion_source: "live" | "offline" | "demo"
+  scenario?: string | null
   t: number
   measured_basis: number
   filtered_basis: number
@@ -132,4 +138,5 @@ export interface InstrumentInfo {
   events_session: number
   events_total_sqlite: number
   last_tick_age_sec: number | null
+  ingestion_source: "live" | "offline" | "demo" | "none"
 }

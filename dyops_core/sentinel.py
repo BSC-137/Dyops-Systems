@@ -139,6 +139,8 @@ class DyopsSentinel:
         token_price: float,
         *,
         schedule_background_audit: bool = True,
+        ingestion_source: str = "live",
+        scenario: str | None = None,
     ) -> EventResult:
         """
         Delegate one telemetry packet to Rust, then run Python-only integrations.
@@ -196,6 +198,8 @@ class DyopsSentinel:
                 instrument_id=self.instrument_id,
                 innovation=_json_safe_float(health.innovation),
                 mahalanobis_distance=_json_safe_float(health.mahalanobis_distance),
+                ingestion_source=ingestion_source,
+                scenario=scenario,
             )
 
         return EventResult(

@@ -6,6 +6,7 @@ import asyncio
 import logging
 import os
 from typing import Any
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -31,6 +32,13 @@ async def _post_with_retry(
         try:
             response = await client.post(url, json=payload)
             response.raise_for_status()
+            target = urlsplit(url)
+            _LOGGER.info(
+                "Dyops webhook delivered: level=%s instrument=%s target=%s",
+                payload.get("level"),
+                payload.get("instrument_id"),
+                target.netloc or "local",
+            )
             return
         except (httpx.HTTPError, asyncio.TimeoutError) as exc:
             if attempt == 1:

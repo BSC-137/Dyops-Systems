@@ -31,7 +31,10 @@ if str(_DYOPS_PY) not in sys.path:
 
 import dyops_core  # noqa: E402
 from loguru import logger  # noqa: E402
-from binance_feed import start_instrument_feed_threads  # noqa: E402
+from binance_feed import (  # noqa: E402
+    start_instrument_feed_threads,
+    start_offline_feed_threads,
+)
 from database import PersistenceManager, REPLAY_WINDOW_EVENTS  # noqa: E402
 from instruments import InstrumentConfig, load_instruments  # noqa: E402
 from scenarios import get_scenario  # noqa: E402
@@ -78,7 +81,8 @@ def _reasoning_row(
     if m > breach_threshold:
         pct_above = (m - breach_threshold) / breach_threshold * 100.0
         return (
-            f"Mahalanobis distance at {m:.2f}σ ({pct_above:.0f}% above sentinel threshold). "
+            f"Mahalanobis distance at {m:.2f} normalized units "
+            f"({pct_above:.0f}% above sentinel threshold). "
             "Correlation fracture detected."
         )
     if m == 0.0:
@@ -120,6 +124,12 @@ def _replay_history_events(
         )
         hp = HistoryPoint(
             instrument_id=str(row.get("instrument_id") or "default"),
+            ingestion_source=str(row.get("ingestion_source") or "live"),
+            scenario=(
+                str(row["scenario"])
+                if row.get("scenario") is not None
+                else None
+            ),
             t=ts,
             measured_basis=float(measured),
             filtered_basis=h.filtered_basis,
@@ -296,6 +306,7 @@ _dropped_tick_count: int = 0
 _processing_error_count: int = 0
 _last_ingest_log_at: dict[str, float] = {}
 _demo_injection_active = False
+_demo_resetting = False
 _webhook_tasks: set[asyncio.Task[None]] = set()
 _instrument_configs: tuple[InstrumentConfig, ...] = ()
 _primary_instrument_id = "default"
@@ -310,6 +321,7 @@ class InstrumentRuntime:
     level: str = "MONITORING"
     last_mahalanobis: float | None = None
     criticality_recent_pct: float = 0.0
+    ingestion_source: str = "none"
 
 
 _instrument_runtimes: dict[str, InstrumentRuntime] = {}
@@ -355,6 +367,7 @@ def _on_startup_sync() -> dict[str, InstrumentRuntime]:
     global _persistence, _sentinel, _session_event_count, _binance_threads
     global _instrument_configs, _instrument_runtimes, _primary_instrument_id
     global _dropped_tick_count, _processing_error_count, _demo_injection_active
+    global _demo_resetting
     db_path = os.environ.get("DYOPS_SQLITE_PATH")
     _persistence = PersistenceManager(db_path)
     _instrument_configs = load_instruments()
@@ -375,21 +388,32 @@ def _on_startup_sync() -> dict[str, InstrumentRuntime]:
     _processing_error_count = 0
     _last_ingest_log_at.clear()
     _demo_injection_active = False
+    _demo_resetting = False
     _sentinel = _instrument_runtimes[_primary_instrument_id].sentinel
     _stop_binance.clear()
-    _binance_threads = start_instrument_feed_threads(
-        _telemetry_queue,
-        _stop_binance,
+    feed_specs = tuple(
         (
-            (
-                config.id,
-                config.feed_mode,
-                config.physical_symbol,
-                config.token_symbol,
-            )
-            for config in _instrument_configs
-        ),
+            config.id,
+            config.feed_mode,
+            config.physical_symbol,
+            config.token_symbol,
+        )
+        for config in _instrument_configs
     )
+    if os.environ.get("DYOPS_OFFLINE_MODE") == "1":
+        interval = float(os.environ.get("DYOPS_OFFLINE_INTERVAL_SEC", "0.25"))
+        _binance_threads = start_offline_feed_threads(
+            _telemetry_queue,
+            _stop_binance,
+            feed_specs,
+            interval_sec=max(0.05, interval),
+        )
+    else:
+        _binance_threads = start_instrument_feed_threads(
+            _telemetry_queue,
+            _stop_binance,
+            feed_specs,
+        )
     return _instrument_runtimes
 
 
@@ -424,12 +448,26 @@ async def _send_escalation_webhook(
             )
         except Exception:  # noqa: BLE001
             pass
-    summary, explainability = _pulse_narrative(
-        live=True,
-        age_sec=0.0,
-        session=session_event_count,
-        total=total,
-    )
+    ingestion_source = str(model["ingestion_source"])
+    if ingestion_source == "live":
+        summary, explainability = _pulse_narrative(
+            live=True,
+            age_sec=0.0,
+            session=session_event_count,
+            total=total,
+        )
+    else:
+        label = "SCENARIO" if ingestion_source == "demo" else "OFFLINE"
+        summary = _clip_text(
+            f"SIMULATED {label} · session {session_event_count} events · "
+            f"{total} persisted in SQLite.",
+            _PULSE_SUMMARY_MAX,
+        )
+        explainability = _clip_text(
+            "Deterministic simulated telemetry exercised the production observer and "
+            "sentinel path; this payload is not market evidence.",
+            _PULSE_EXPLAIN_MAX,
+        )
     health = model["health"]
     payload: dict[str, Any] = {
         "timestamp": model["timestamp"],
@@ -469,7 +507,11 @@ async def _telemetry_pump() -> None:
     global _dropped_tick_count, _processing_error_count, _demo_injection_active
     assert _instrument_runtimes
     while True:
+        if _demo_resetting:
+            await asyncio.sleep(0.01)
+            continue
         is_demo = False
+        ingestion_source = "live"
         delay_after = 0.0
         demo_scenario: str | None = None
         demo_last = False
@@ -491,10 +533,13 @@ async def _telemetry_pump() -> None:
                 ts, phys, tok, delay_after = demo_item
                 instrument_id = _primary_instrument_id
             is_demo = True
+            ingestion_source = "demo"
         except queue.Empty:
             try:
                 item = _telemetry_queue.get_nowait()
-                if len(item) == 4:
+                if len(item) == 5:
+                    instrument_id, ts, phys, tok, ingestion_source = item
+                elif len(item) == 4:
                     instrument_id, ts, phys, tok = item
                 else:
                     ts, phys, tok = item
@@ -519,6 +564,8 @@ async def _telemetry_pump() -> None:
                 phys,
                 tok,
                 schedule_background_audit=not is_demo,
+                ingestion_source=ingestion_source,
+                scenario=demo_scenario,
             )
         except Exception as exc:  # noqa: BLE001
             _processing_error_count += 1
@@ -537,6 +584,7 @@ async def _telemetry_pump() -> None:
         runtime.session_event_count += 1
         runtime.level = result.level.name
         runtime.criticality_recent_pct = result.criticality_recent_pct
+        runtime.ingestion_source = ingestion_source
         mahalanobis = float(result.health.mahalanobis_distance)
         runtime.last_mahalanobis = mahalanobis if math.isfinite(mahalanobis) else None
         if runtime.config.id == _primary_instrument_id:
@@ -548,10 +596,12 @@ async def _telemetry_pump() -> None:
         model["physical_price"] = phys
         model["token_price"] = tok
         model["session_event_index"] = runtime.session_event_count
-        model["ingestion_source"] = "demo" if is_demo else "live"
+        model["ingestion_source"] = ingestion_source
         if demo_scenario is not None:
             model["demo_scenario"] = demo_scenario
-        if not is_demo and (
+        simulated_webhooks = os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1"
+        webhook_allowed = ingestion_source == "live" or simulated_webhooks
+        if webhook_allowed and (
             result.level.name == "BREACH" or result.snapshot is not None
         ):
             _schedule_escalation_webhook(
@@ -641,6 +691,9 @@ class StatusResponse(BaseModel):
     processing_error_count: int
     stale_cutoff_sec: float
     replay_window_events: int
+    offline_mode: bool
+    feed_source: str
+    demo_webhooks_enabled: bool
 
 
 class InstrumentResponse(BaseModel):
@@ -657,6 +710,7 @@ class InstrumentResponse(BaseModel):
     events_session: int
     events_total_sqlite: int
     last_tick_age_sec: float | None
+    ingestion_source: str
 
 
 def _instrument_runtime(instrument: str | None) -> InstrumentRuntime:
@@ -690,6 +744,7 @@ async def api_instruments() -> list[InstrumentResponse]:
                     _persistence.count_events(config.id) if _persistence else 0
                 ),
                 last_tick_age_sec=age,
+                ingestion_source=runtime.ingestion_source,
             )
         )
     return out
@@ -728,6 +783,13 @@ async def api_status() -> StatusResponse:
         processing_error_count=_processing_error_count,
         stale_cutoff_sec=STALE_CUTOFF_SEC,
         replay_window_events=REPLAY_WINDOW_EVENTS,
+        offline_mode=os.environ.get("DYOPS_OFFLINE_MODE") == "1",
+        feed_source=(
+            "offline_deterministic"
+            if os.environ.get("DYOPS_OFFLINE_MODE") == "1"
+            else "binance_market"
+        ),
+        demo_webhooks_enabled=os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1",
     )
 
 
@@ -739,16 +801,7 @@ async def inject_demo_scenario(
     x_dyops_demo_secret: str | None = Header(default=None),
 ) -> dict[str, int | str]:
     global _demo_injection_active
-    if os.environ.get("DYOPS_DEMO_INJECT") != "1":
-        raise HTTPException(status_code=404, detail="Not found")
-    expected_secret = os.environ.get("DYOPS_DEMO_SECRET", "")
-    if not expected_secret:
-        raise HTTPException(status_code=503, detail="Demo secret is not configured")
-    if x_dyops_demo_secret is None or not secrets.compare_digest(
-        x_dyops_demo_secret,
-        expected_secret,
-    ):
-        raise HTTPException(status_code=401, detail="Invalid demo secret")
+    _require_demo_access(x_dyops_demo_secret)
     if name != "sudden_depeg":
         raise HTTPException(status_code=400, detail="Only sudden_depeg is available")
     if _demo_injection_active:
@@ -783,8 +836,104 @@ async def inject_demo_scenario(
     }
 
 
+def _require_demo_access(provided_secret: str | None) -> None:
+    if os.environ.get("DYOPS_DEMO_INJECT") != "1":
+        raise HTTPException(status_code=404, detail="Not found")
+    expected_secret = os.environ.get("DYOPS_DEMO_SECRET", "")
+    if not expected_secret:
+        raise HTTPException(status_code=503, detail="Demo secret is not configured")
+    if provided_secret is None or not secrets.compare_digest(
+        provided_secret,
+        expected_secret,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid demo secret")
+
+
+def _drain_instrument_queue(
+    target: queue.Queue,
+    instrument_id: str,
+    *,
+    tagged_lengths: set[int],
+) -> None:
+    retained: list[Any] = []
+    while True:
+        try:
+            item = target.get_nowait()
+        except queue.Empty:
+            break
+        item_instrument = (
+            str(item[0])
+            if isinstance(item, tuple) and len(item) in tagged_lengths
+            else _primary_instrument_id
+        )
+        if item_instrument != instrument_id:
+            retained.append(item)
+    for item in retained:
+        target.put_nowait(item)
+
+
+@app.post("/api/demo/reset")
+async def reset_demo(
+    instrument: str | None = None,
+    x_dyops_demo_secret: str | None = Header(default=None),
+) -> dict[str, str]:
+    """Reset one demo instrument's persisted history and in-memory policy state."""
+    global _demo_injection_active, _demo_resetting, _sentinel
+    global _session_event_count, _last_tick_monotonic
+    _require_demo_access(x_dyops_demo_secret)
+    runtime = _instrument_runtime(instrument)
+    assert _persistence is not None
+    _demo_resetting = True
+    _demo_injection_active = False
+    _drain_instrument_queue(
+        _demo_telemetry_queue,
+        runtime.config.id,
+        tagged_lengths={5, 7},
+    )
+    _drain_instrument_queue(
+        _telemetry_queue,
+        runtime.config.id,
+        tagged_lengths={4, 5},
+    )
+    try:
+        await asyncio.to_thread(
+            _persistence.reset_instrument,
+            runtime.config.id,
+            5.0,
+        )
+        observer = dyops_core.BasisObserver(
+            name=f"dyops-api-{runtime.config.id}",
+            theta=1.0,
+            ring_buffer_capacity=1000,
+        )
+        runtime.sentinel = DyopsSentinel(
+            observer,
+            auditor=runtime.sentinel.auditor,
+            persistence=_persistence,
+            instrument_id=runtime.config.id,
+        )
+        runtime.session_event_count = 0
+        runtime.last_tick_monotonic = 0.0
+        runtime.level = "MONITORING"
+        runtime.last_mahalanobis = None
+        runtime.criticality_recent_pct = 0.0
+        runtime.ingestion_source = "none"
+        if runtime.config.id == _primary_instrument_id:
+            _sentinel = runtime.sentinel
+            _session_event_count = 0
+            _last_tick_monotonic = 0.0
+    finally:
+        _demo_resetting = False
+    return {
+        "status": "reset",
+        "instrument_id": runtime.config.id,
+    }
+
+
 class HistoryPoint(BaseModel):
     instrument_id: str = "default"
+    ingestion_source: str = "live"
+    scenario: str | None = None
     t: float
     measured_basis: float
     filtered_basis: float
@@ -817,6 +966,7 @@ class PulseResponse(BaseModel):
     events_total_sqlite: int
     summary: str = ""
     explainability: str = ""
+    ingestion_source: str = "none"
 
 
 @app.get("/api/history", response_model=list[HistoryPoint])
@@ -886,6 +1036,7 @@ async def api_pulse(instrument: str | None = None) -> PulseResponse:
         events_total_sqlite=total_sqlite,
         summary=summary,
         explainability=explainability,
+        ingestion_source=runtime.ingestion_source,
     )
 
 

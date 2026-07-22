@@ -1,5 +1,5 @@
 import { Download } from "lucide-react"
-import { useMemo, useState } from "react"
+import { useEffect, useMemo, useState } from "react"
 import { Badge } from "@/components/ui/badge"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { deriveIncidentWindows, incidentSummary } from "@/lib/incidents"
@@ -42,8 +42,19 @@ function exportIncident(
   breachThreshold: number,
 ) {
   const payload = {
+    artifact_type: "dyops_incident_export",
+    artifact_version: 1,
     exported_at: new Date().toISOString(),
     instrument_id: instrumentId,
+    data_sources: Array.from(new Set(points.map((point) => point.ingestion_source))),
+    scenarios: Array.from(
+      new Set(
+        points
+          .map((point) => point.scenario)
+          .filter((scenario): scenario is string => Boolean(scenario)),
+      ),
+    ),
+    reasoning_source: "deterministic_replay",
     incident: {
       id: incident.id,
       kind: incident.kind,
@@ -92,6 +103,18 @@ export function IncidentsTab({
     ],
   )
   const [selectedId, setSelectedId] = useState<string | null>(null)
+  const preferredIncidentId =
+    incidents.find((incident) =>
+      (trace?.points ?? [])
+        .slice(incident.startIndex, incident.endIndex + 1)
+        .some((point) => point.ingestion_source === "demo"),
+    )?.id ??
+    incidents[0]?.id ??
+    null
+  useEffect(() => {
+    const timer = window.setTimeout(() => setSelectedId(preferredIncidentId), 0)
+    return () => window.clearTimeout(timer)
+  }, [preferredIncidentId])
   const effectiveSelectedId = incidents.some(
     (incident) => incident.id === selectedId,
   )
@@ -181,6 +204,25 @@ export function IncidentsTab({
                   <p className="mt-2 max-w-3xl font-mono-nums text-[11px] leading-relaxed text-zinc-500">
                     {incidentSummary(selected, selectedPoints, breachThreshold)}
                   </p>
+                  <div className="mt-2 flex flex-wrap gap-1.5">
+                    {Array.from(
+                      new Set(
+                        selectedPoints.map((point) => point.ingestion_source),
+                      ),
+                    ).map((source) => (
+                      <Badge
+                        key={source}
+                        variant={source === "live" ? "success" : "warning"}
+                        className="font-mono-nums text-[9px]"
+                      >
+                        {source === "live"
+                          ? "MARKET DATA"
+                          : source === "offline"
+                            ? "SIMULATED OFFLINE"
+                            : "SIMULATED SCENARIO"}
+                      </Badge>
+                    ))}
+                  </div>
                 </div>
                 <button
                   type="button"
@@ -202,7 +244,7 @@ export function IncidentsTab({
               {selected.audits.length > 0 ? (
                 <div className="border-b border-[var(--color-border)] px-5 py-3">
                   <p className="mb-2 text-[10px] font-medium uppercase tracking-widest text-zinc-600">
-                    Audit narrative
+                    Optional Gemini narrative
                   </p>
                   <div className="space-y-2">
                     {selected.audits.map((audit) => {
@@ -213,9 +255,9 @@ export function IncidentsTab({
                           className="border-l border-zinc-700 pl-3"
                         >
                           <p className="font-mono-nums text-[11px] leading-relaxed text-zinc-400">
-                            {report?.executive_summary ||
+                            {report?.cause ||
                               report?.mitigation_strategy ||
-                              report?.cause ||
+                              report?.executive_summary ||
                               "Audit snapshot recorded without a narrative."}
                           </p>
                           <p className="mt-1 font-mono-nums text-[10px] text-zinc-600">
@@ -229,6 +271,10 @@ export function IncidentsTab({
                   </div>
                 </div>
               ) : null}
+
+              <div className="border-b border-[var(--color-border)] px-5 py-2 font-mono-nums text-[10px] text-zinc-600">
+                Per-tick reasoning below is deterministic and available without Gemini.
+              </div>
 
               <ScrollArea className="min-h-[320px] flex-1">
                 <div className="min-w-[720px]">

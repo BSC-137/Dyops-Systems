@@ -5,13 +5,22 @@ services:
       dockerfile: Dockerfile.api
     environment:
       DYOPS_BINANCE_FEED: ${DYOPS_BINANCE_FEED:-stable}
+      DYOPS_INSTRUMENTS: ${DYOPS_INSTRUMENTS:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      DYOPS_GEMINI_MODEL: ${DYOPS_GEMINI_MODEL:-gemini-3-flash}
       DYOPS_DEMO_INJECT: ${DYOPS_DEMO_INJECT:-0}
       DYOPS_DEMO_SECRET: ${DYOPS_DEMO_SECRET:-}
+      DYOPS_DEMO_WEBHOOKS: ${DYOPS_DEMO_WEBHOOKS:-0}
+      DYOPS_OFFLINE_MODE: ${DYOPS_OFFLINE_MODE:-0}
+      DYOPS_OFFLINE_INTERVAL_SEC: ${DYOPS_OFFLINE_INTERVAL_SEC:-0.25}
       DYOPS_WEBHOOK_URLS: ${DYOPS_WEBHOOK_URLS:-}
       DYOPS_CORS_ORIGINS: ${DYOPS_CORS_ORIGINS:-http://localhost:8080}
       DYOPS_SQLITE_PATH: /data/dyops_ts.db
     ports:
       - "8000:8000"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
     volumes:
       - dyops-data:/data
     healthcheck:

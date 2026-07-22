@@ -16,6 +16,11 @@ The measurement, escalation, and validation boundaries are documented in
 The vendor-neutral comparative harness, dataset contract, leakage controls, and
 historical-evidence boundary are documented in
 [`docs/HISTORICAL_EVALUATION.md`](docs/HISTORICAL_EVALUATION.md).
+The presenter sequence and integration examples are in
+[`docs/DEMO_RUNBOOK.md`](docs/DEMO_RUNBOOK.md) and
+[`docs/INTEGRATION_EXAMPLES.md`](docs/INTEGRATION_EXAMPLES.md).
+The one-page architecture/evidence handout is
+[`docs/TECHNICAL_LEAVE_BEHIND.md`](docs/TECHNICAL_LEAVE_BEHIND.md).
 
 **CI runs Rust tests, deterministic scenarios, Python/backend tests, frontend
 lint/build, and a Docker Compose smoke test on every pull request to `main`.**
@@ -36,7 +41,7 @@ lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 
 ---
 
-## 5-Minute Partner Evaluation
+## 8–10 Minute Partner Evaluation
 
 Cold start → confirm value in three acts. **Ports:** API **8000**, Vite **5173** (proxies `/api` and `/ws` to the API).
 
@@ -89,7 +94,9 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
 
 ### Act I — The Pulse (filtered state)
 
-- **UI:** Header **System pulse** shows **LIVE** vs **STALE** (solid dot; stale ≈ **no tick for ~12s**). **Global events** reflects SQLite event count.
+- **UI:** Header shows telemetry source (**MARKET · LIVE**, **SIMULATED · OFFLINE**,
+  or **SIMULATED · scenario**), current instrument, freshness age, and LIVE/STALE.
+  **Instrument events** reflects the instrument-scoped SQLite count.
 - **UI:** Card **Real-Time Telemetry** — under the title, copy from **`GET /api/pulse`** fields **`summary`** · **`explainability`** (hover for full text).
 - **UI:** Chart — **Filtered state** (emerald), **Measured basis** (slate), **Innovation (residual)** (stone) — live points from **`/ws/telemetry`** after history loads from **`GET /api/history`**.
 - **API:** `GET http://127.0.0.1:8000/api/pulse` — `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, `summary`, `explainability`.
@@ -98,7 +105,8 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
 
 ### Act II — The Drift (anomaly / statistical surprise)
 
-- **UI:** Same chart — right axis **Mahalanobis distance**; dashed **Criticality threshold** matches **`mahalanobis_breach_threshold`** from **`GET /api/status`** (aligned with **`MAHALANOBIS_BREACH`** in [`dyops_core/sentinel.py`](dyops_core/sentinel.py)).
+- **UI:** Same chart — right axis **Mahalanobis distance**; dashed **breach
+  threshold** matches `mahalanobis_breach_threshold` from `GET /api/status`.
 - **UI:** **Structural Drift Audit** — top block: window **`summary`** and **`explainability`** from **`GET /api/history/trace`** (breach counts in natural language).
 - **API:** `GET http://127.0.0.1:8000/api/history/trace?limit=500` — each point includes deterministic **`reasoning`** (Mahalanobis vs threshold, validity). **Not** Gemini-generated.
 
@@ -112,6 +120,8 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
   and compact Structural Drift Audit summary.
 - **When Gemini is OFFLINE:** incident windows and `/api/history/trace` remain fully
   deterministic; optional LLM narrative is additive.
+- **Integration:** show OpenAPI, the telemetry WebSocket, exported incident JSON, and
+  the local webhook receiver. Injected webhooks require explicit demo opt-in.
 
 ---
 
@@ -286,7 +296,10 @@ The app is documented in OpenAPI with an explicit product line:
 
 **Explainability internals (replay)**
 
-Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pattern as `/api/history`). Per-row **`reasoning`** is computed with **`MAHALANOBIS_BREACH`** as the sentinel threshold—for example when breached and measurement is valid, copy includes Mahalanobis magnitude and **percent above threshold** (“σ” here is **product shorthand** for the normalized statistic, not an implied Gaussian claim). Invalid measurements get a withheld-measurement explanation.
+Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pattern
+as `/api/history`). Per-row `reasoning` is computed with `MAHALANOBIS_BREACH` as
+the threshold and describes Mahalanobis in **normalized model units**, not as a default
+probability. Invalid measurements get a withheld-measurement explanation.
 
 #### 7. React frontend (`frontend/`)
 
@@ -299,17 +312,22 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 **Telemetry chart (“Real-Time Telemetry”)**
 
-- **Data**: Loads **`GET /api/history`**; live updates from **`/ws/telemetry`** (buffer up to **500** points server-side on the client).
+- **Data**: Loads **`GET /api/history`**; live updates from **`/ws/telemetry`**
+  (client buffer up to **500** points).
 - **Rolling draw window**: Only the trailing **`CHART_VISIBLE_POINTS`** (**120**) points are passed to **Recharts** so quiet stable feeds stay **visually readable** (scales react to recent behavior, not weeks of SQLite tail).
 - **Left Y-axis** (`basis`): **measured basis** (muted slate), **filtered state** (Signal Emerald), **innovation / residual** (stone-soft). Domain uses finite samples with optional **robust percentile** band (≥30 points → 1st–99th + padding); **tiny spans** expand to **`BASIS_MIN_DISPLAY_SPAN`** so micro-drift isn’t flattened to a hairline.
-- **Right Y-axis** (`mahal`): **Mahalanobis distance**; domain **`[0, max(breachThreshold, max_seen × 1.15)]`** with breach threshold from **`GET /api/status`**. Horizontal **criticality threshold** (`ReferenceLine`) matches sentinel breach cutoff.
+- **Right Y-axis** (`mahal`): **Mahalanobis distance**; domain
+  `[0, max(breachThreshold, max_seen × 1.15)]` with the breach threshold from
+  `GET /api/status`. The horizontal reference line matches the sentinel breach cutoff.
 - **X-axis**: if the visible window crosses a **calendar day**, tick labels prepend a short date.
 - Charts use **`isAnimationActive={false}`** (no flashy transitions).
 
 **Explainability surfaces**
 
 - **`GET /api/pulse`**: **`summary` · `explainability`** concatenated under the telemetry card title (truncated/`line-clamp`, full text on **`title`** hover).
-- **`GET /api/history/trace`**: **`summary`** + **`explainability`** under **Structural Drift Audit** (border-accent block). Gemini audit cards unchanged below.
+- **`GET /api/history/trace`**: **`summary`** + **`explainability`** under
+  **Structural Drift Audit**. The **Incidents** tab reconstructs windows and shows
+  deterministic per-tick reasoning; optional Gemini narratives are labeled separately.
 
 **Resilience**
 
@@ -337,6 +355,9 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 | `DYOPS_WEBHOOK_URLS` | Optional comma-separated partner webhook URLs |
 | `DYOPS_DEMO_INJECT` | Set to `1` only for an explicit demo; disabled by default |
 | `DYOPS_DEMO_SECRET` | Shared secret required in `X-Dyops-Demo-Secret` for demo injection |
+| `DYOPS_OFFLINE_MODE` | Set to `1` for a deterministic current feed with no external network |
+| `DYOPS_OFFLINE_INTERVAL_SEC` | Offline heartbeat cadence (default `0.25`) |
+| `DYOPS_DEMO_WEBHOOKS` | Explicitly allow simulated scenario webhooks; disabled by default |
 
 ---
 
@@ -346,7 +367,8 @@ The supported partner demo path builds the Rust extension in release mode, runs 
 
 ```bash
 cp .env.example .env
-./scripts/demo.sh
+docker compose build       # recommended pre-build before a meeting
+./scripts/demo.sh live
 ```
 
 Open:
@@ -367,6 +389,22 @@ keeps injection disabled. To inject without the UI:
 curl -X POST \
   -H 'X-Dyops-Demo-Secret: dyops-local-demo' \
   'http://localhost:8000/api/demo/inject_scenario?name=sudden_depeg&seed=13'
+```
+
+If Binance or external networking is unavailable:
+
+```bash
+docker compose down -v
+./scripts/demo.sh offline
+```
+
+The offline source is deterministic and visibly labeled **SIMULATED · OFFLINE**. Reset
+between two scenario runs with the UI **Reset demo** control or:
+
+```bash
+curl -X POST \
+  -H 'X-Dyops-Demo-Secret: dyops-local-demo' \
+  http://localhost:8000/api/demo/reset
 ```
 
 ---
@@ -464,6 +502,7 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 | `GET /api/history?instrument=&limit=` | Instrument-scoped bare **`HistoryPoint[]`**, including `instrument_id` |
 | `GET /api/history/trace?instrument=&limit=` | Instrument-scoped trace bundle with deterministic per-tick `reasoning` |
 | `POST /api/demo/inject_scenario` | Explicit-demo-only synthetic injection; requires `X-Dyops-Demo-Secret` |
+| `POST /api/demo/reset` | Clears one demo instrument and resets observer/policy state; requires the demo secret |
 | `WebSocket /ws/telemetry` | Shared live stream; every payload includes `instrument_id` for client filtering |
 | `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
 
@@ -481,7 +520,11 @@ DYOPS_INSTRUMENTS=stable,lst uvicorn backend.main:app --host 0.0.0.0 --port 8000
 
 For custom names and metadata, use a JSON array, for example `DYOPS_INSTRUMENTS='[{"id":"usdc-usdt","label":"USDC / USDT","feed_mode":"stable","physical_symbol":"USD","token_symbol":"USDCUSDT","synthetic":true},{"id":"eth-steth","label":"ETH / stETH","feed_mode":"lst","physical_symbol":"ETHUSDT","token_symbol":"STETHUSDT"}]'`. Thresholds remain global; observer state, SQLite history, pulse, and escalation routing are partitioned by instrument.
 
-Set **`DYOPS_WEBHOOK_URLS`** to one or more comma-separated HTTPS webhook URLs. Dyops sends a JSON `POST` for every **BREACH** and for each cooldown-gated **AUDIT snapshot** (the first snapshot is immediate). Delivery runs outside the telemetry pump, has a 2-second HTTP timeout, and retries once on HTTP or network failure.
+Set `DYOPS_WEBHOOK_URLS` to one or more comma-separated webhook URLs. Use HTTPS for
+partner endpoints; localhost HTTP is supported for development. Dyops sends a JSON
+`POST` for every live **BREACH** and each cooldown-gated **AUDIT snapshot**. Simulated
+scenario webhooks additionally require `DYOPS_DEMO_WEBHOOKS=1`. Delivery runs outside
+the telemetry pump, has a 2-second timeout, and retries once.
 
 The payload contains `timestamp`, `level`, `mahalanobis`, `innovation`, `criticality_recent_pct`, `instrument_id`, and the pulse `summary` and `explainability` fields. It also contains `event_id` when an ID is already available; asynchronous SQLite writes mean it is normally omitted from live escalation payloads.
 
@@ -495,8 +538,9 @@ This integration uses plain HTTP webhooks through `httpx`; it does not require a
 - **SQLite `event_id`** on audits is **best-effort** (tied to writer state at insert time); for strict lineage, prefer timestamps and full `report_json`.
 - **Replay**: startup and forensic APIs share a bounded maximum of **1,000 most
   recent events per instrument**, oldest-first. Smaller API limits select a suffix.
-- **Demo labels**: telemetry payloads add `ingestion_source` (`live` or `demo`) and
-  demo payloads add `demo_scenario`. Demo escalations do not call partner webhooks.
+- **Source labels**: telemetry and persisted history carry `ingestion_source`
+  (`live`, `offline`, or `demo`); scenario rows also carry `scenario`. Demo
+  escalations call webhooks only under explicit `DYOPS_DEMO_WEBHOOKS=1`.
 - **Chart vs trace**: the UI refreshes forensic trace after demo injection and
   escalation events so incident copy does not lag the live chart.
 

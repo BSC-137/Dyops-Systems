@@ -15,6 +15,7 @@ import { IncidentsTab } from "@/components/IncidentsTab"
 import { InstrumentsTab } from "@/components/InstrumentsTab"
 import { Badge } from "@/components/ui/badge"
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card"
+import { deriveIncidentWindows } from "@/lib/incidents"
 import type {
   AuditRow,
   ChartPoint,
@@ -109,6 +110,14 @@ function wsUrl(path: string) {
   return `${proto}//${window.location.host}${path}`
 }
 
+function getDemoSecret(): string | null {
+  let secret = window.sessionStorage.getItem("dyops-demo-secret")
+  if (secret) return secret
+  secret = window.prompt("Enter the demo injection secret", "dyops-local-demo")
+  if (secret) window.sessionStorage.setItem("dyops-demo-secret", secret)
+  return secret
+}
+
 function levelBadgeVariant(
   level: SentinelLevel,
 ): "success" | "warning" | "destructive" {
@@ -148,7 +157,15 @@ export default function App() {
   const [auditCooldownTicks, setAuditCooldownTicks] = useState(0)
   const [demoInjectEnabled, setDemoInjectEnabled] = useState(false)
   const [demoInjectRunning, setDemoInjectRunning] = useState(false)
-  const [ingestionSource, setIngestionSource] = useState<"live" | "demo">("live")
+  const [ingestionSource, setIngestionSource] =
+    useState<"live" | "offline" | "demo" | "none">("none")
+  const [demoScenario, setDemoScenario] = useState<string | null>(null)
+  const [pulseAgeSec, setPulseAgeSec] = useState<number | null>(null)
+  const [staleCutoffSec, setStaleCutoffSec] = useState(12)
+  const [webhookConfigured, setWebhookConfigured] = useState(false)
+  const [feedSource, setFeedSource] =
+    useState<"binance_market" | "offline_deterministic">("binance_market")
+  const [demoInjectionActive, setDemoInjectionActive] = useState(false)
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceBundle, setTraceBundle] = useState<HistoryTraceBundle | null>(null)
   const [pulseSummaryLine, setPulseSummaryLine] = useState("")
@@ -158,8 +175,9 @@ export default function App() {
   const snapshotHighlightTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null)
   const demoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const forensicRefreshTimerRef =
-    useRef<ReturnType<typeof setTimeout> | null>(null)
+  const forensicRefreshTimersRef =
+    useRef<ReturnType<typeof setTimeout>[]>([])
+  const previousDemoActiveRef = useRef(false)
 
   const mergeChart = useCallback((point: ChartPoint) => {
     chartDataRef.current = [...chartDataRef.current, point].slice(-MAX_POINTS)
@@ -229,6 +247,19 @@ export default function App() {
     }
   }, [selectedInstrumentId])
 
+  const refreshForensics = useCallback(async () => {
+    await Promise.all([loadHistory(), loadHistoryTrace()])
+  }, [loadHistory, loadHistoryTrace])
+
+  const scheduleForensicRefresh = useCallback(() => {
+    forensicRefreshTimersRef.current.forEach(clearTimeout)
+    forensicRefreshTimersRef.current = [250, 900, 1800].map((delay) =>
+      setTimeout(() => {
+        void refreshForensics()
+      }, delay),
+    )
+  }, [refreshForensics])
+
   useEffect(() => {
     void loadHistoryTrace()
   }, [loadHistoryTrace])
@@ -291,14 +322,9 @@ export default function App() {
           setSentinelLevel(p.level)
           setCriticalityRecentPct(p.criticality_recent_pct)
           setIngestionSource(p.ingestion_source)
+          setDemoScenario(p.demo_scenario ?? null)
           if (p.level !== "MONITORING" || p.snapshot !== null) {
-            if (forensicRefreshTimerRef.current !== null) {
-              clearTimeout(forensicRefreshTimerRef.current)
-            }
-            forensicRefreshTimerRef.current = setTimeout(() => {
-              void loadHistoryTrace()
-              forensicRefreshTimerRef.current = null
-            }, 300)
+            scheduleForensicRefresh()
           }
           if (p.snapshot !== null) {
             setSnapshotHighlighted(true)
@@ -334,12 +360,10 @@ export default function App() {
         clearTimeout(snapshotHighlightTimerRef.current)
         snapshotHighlightTimerRef.current = null
       }
-      if (forensicRefreshTimerRef.current !== null) {
-        clearTimeout(forensicRefreshTimerRef.current)
-        forensicRefreshTimerRef.current = null
-      }
+      forensicRefreshTimersRef.current.forEach(clearTimeout)
+      forensicRefreshTimersRef.current = []
     }
-  }, [loadHistoryTrace, mergeChart, selectedInstrumentId])
+  }, [mergeChart, scheduleForensicRefresh, selectedInstrumentId])
 
   const upsertAudit = useCallback((row: AuditRow) => {
     const m = auditsRef.current
@@ -381,6 +405,8 @@ export default function App() {
         if (pulseR.ok) {
           const p = (await pulseR.json()) as PulseResponse
           setPulseLive(!!p.live)
+          setPulseAgeSec(p.last_tick_age_sec)
+          setIngestionSource(p.ingestion_source)
           setEventsTotal(Number(p.events_total_sqlite ?? 0))
           const summary = (p.summary ?? "").trim()
           const explain = (p.explainability ?? "").trim()
@@ -393,12 +419,20 @@ export default function App() {
         if (statusR.ok) {
           const s = (await statusR.json()) as StatusResponse
           setGeminiOk(s.gemini_configured)
+          setWebhookConfigured(!!s.webhook_configured)
+          setFeedSource(s.feed_source)
           setFeedMode(s.binance_feed)
           setMahalanobisBreachThreshold(s.mahalanobis_breach_threshold)
           setCriticalityWindowEvents(s.criticality_window_events)
           setCriticalityAuditPct(s.criticality_audit_pct)
           setAuditCooldownTicks(s.audit_cooldown_ticks)
           setDemoInjectEnabled(s.demo_inject_enabled)
+          setStaleCutoffSec(s.stale_cutoff_sec)
+          setDemoInjectionActive(s.demo_injection_active)
+          if (previousDemoActiveRef.current && !s.demo_injection_active) {
+            scheduleForensicRefresh()
+          }
+          previousDemoActiveRef.current = s.demo_injection_active
         }
         if (instrumentsR.ok) {
           const next = (await instrumentsR.json()) as InstrumentInfo[]
@@ -419,25 +453,18 @@ export default function App() {
     tick()
     const t = setInterval(tick, 2000)
     return () => clearInterval(t)
-  }, [selectedInstrumentId])
+  }, [scheduleForensicRefresh, selectedInstrumentId])
 
   const injectSuddenDepeg = useCallback(async () => {
     setDemoInjectRunning(true)
     try {
-      let demoSecret = window.sessionStorage.getItem("dyops-demo-secret")
+      const demoSecret = getDemoSecret()
       if (!demoSecret) {
-        demoSecret = window.prompt(
-          "Enter the demo injection secret",
-          "dyops-local-demo",
-        )
-        if (!demoSecret) {
-          setDemoInjectRunning(false)
-          return
-        }
-        window.sessionStorage.setItem("dyops-demo-secret", demoSecret)
+        setDemoInjectRunning(false)
+        return
       }
       const response = await fetch(
-        `/api/demo/inject_scenario?name=sudden_depeg${
+        `/api/demo/inject_scenario?name=sudden_depeg&seed=13${
           selectedInstrumentId
             ? `&instrument=${encodeURIComponent(selectedInstrumentId)}`
             : ""
@@ -450,13 +477,35 @@ export default function App() {
       if (!response.ok) throw new Error(String(response.status))
       demoResetTimerRef.current = setTimeout(() => {
         setDemoInjectRunning(false)
-        void Promise.all([loadHistory(), loadHistoryTrace()])
+        void refreshForensics()
         demoResetTimerRef.current = null
       }, 7000)
     } catch {
       setDemoInjectRunning(false)
     }
-  }, [loadHistory, loadHistoryTrace, selectedInstrumentId])
+  }, [refreshForensics, selectedInstrumentId])
+
+  const resetDemo = useCallback(async () => {
+    const demoSecret = getDemoSecret()
+    if (!demoSecret) return
+    setDemoInjectRunning(true)
+    try {
+      const suffix = selectedInstrumentId
+        ? `?instrument=${encodeURIComponent(selectedInstrumentId)}`
+        : ""
+      const response = await fetch(`/api/demo/reset${suffix}`, {
+        method: "POST",
+        headers: { "X-Dyops-Demo-Secret": demoSecret },
+      })
+      if (!response.ok) throw new Error(String(response.status))
+      setDemoScenario(null)
+      setSentinelLevel("MONITORING")
+      setCriticalityRecentPct(0)
+      await refreshForensics()
+    } finally {
+      setDemoInjectRunning(false)
+    }
+  }, [refreshForensics, selectedInstrumentId])
 
   useEffect(
     () => () => {
@@ -527,6 +576,44 @@ export default function App() {
     [],
   )
 
+  const selectedInstrument = instruments.find(
+    (instrument) => instrument.id === selectedInstrumentId,
+  )
+  const selectedAudits = useMemo(
+    () =>
+      audits.filter(
+        (audit) =>
+          (audit.instrument_id ?? "default") ===
+          (selectedInstrumentId || "default"),
+      ),
+    [audits, selectedInstrumentId],
+  )
+  const incidentCount = useMemo(
+    () =>
+      deriveIncidentWindows(traceBundle?.points ?? [], selectedAudits, {
+        breachThreshold: mahalanobisBreachThreshold,
+        criticalityWindowEvents,
+        criticalityAuditPct,
+      }).length,
+    [
+      criticalityAuditPct,
+      criticalityWindowEvents,
+      mahalanobisBreachThreshold,
+      selectedAudits,
+      traceBundle?.points,
+    ],
+  )
+  const sourceLabel =
+    ingestionSource === "demo"
+      ? `SIMULATED · ${demoScenario ?? "SCENARIO"}`
+      : ingestionSource === "offline"
+        ? "SIMULATED · OFFLINE"
+        : ingestionSource === "live"
+          ? pulseLive
+            ? "MARKET · LIVE"
+            : "MARKET · STALE"
+          : "SOURCE · WAITING"
+
   const methodologyHover =
     "Kalman-Filtered State Tracking vs. Static Thresholds"
 
@@ -554,20 +641,38 @@ export default function App() {
           {activeTab === "live" && demoInjectEnabled ? (
             <button
               type="button"
-              disabled={demoInjectRunning}
+              disabled={demoInjectRunning || demoInjectionActive}
               onClick={injectSuddenDepeg}
               className="w-fit rounded-md border border-amber-900/70 bg-amber-950/20 px-2 py-1 font-mono-nums text-[10px] text-amber-300/80 transition-colors hover:border-amber-800 hover:text-amber-200 disabled:cursor-wait disabled:border-zinc-800 disabled:text-zinc-600"
             >
-              {demoInjectRunning
+              {demoInjectRunning || demoInjectionActive
                 ? "Demo: sudden depeg running…"
                 : "Demo: inject sudden depeg"}
             </button>
           ) : null}
-          {ingestionSource === "demo" ? (
-            <Badge variant="warning" className="font-mono-nums text-[10px]">
-              Synthetic demo telemetry
-            </Badge>
+          {activeTab === "live" && demoInjectEnabled ? (
+            <button
+              type="button"
+              disabled={demoInjectRunning || demoInjectionActive}
+              onClick={resetDemo}
+              className="w-fit rounded-md border border-zinc-800 px-2 py-1 font-mono-nums text-[10px] text-zinc-500 transition-colors hover:border-zinc-700 hover:text-zinc-300 disabled:cursor-wait disabled:text-zinc-700"
+            >
+              Reset demo
+            </button>
           ) : null}
+          <Badge
+            variant={
+              ingestionSource === "live" && pulseLive
+                ? "success"
+                : ingestionSource === "demo"
+                  ? "warning"
+                  : "outline"
+            }
+            className="font-mono-nums text-[10px]"
+            title={`Current telemetry source: ${feedSource}`}
+          >
+            {sourceLabel}
+          </Badge>
         </div>
 
         <div className="flex flex-wrap items-center justify-end gap-4">
@@ -582,6 +687,12 @@ export default function App() {
             <span
               className={`size-2 rounded-full ${pulseLive ? "bg-emerald-600" : "bg-zinc-600"}`}
             />
+            <span
+              className="font-mono-nums text-[10px] text-zinc-600"
+              title={`Data is stale after ${staleCutoffSec.toFixed(0)} seconds`}
+            >
+              {pulseAgeSec === null ? "age —" : `age ${pulseAgeSec.toFixed(1)}s`}
+            </span>
             <Badge
               variant={levelBadgeVariant(sentinelLevel)}
               className="text-[10px]"
@@ -604,10 +715,25 @@ export default function App() {
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <BrainCircuit className="size-3.5" aria-hidden />
             <span className="uppercase tracking-wide">Gemini</span>
-            <Badge variant={geminiOk ? "success" : "outline"}>
-              {geminiOk ? "CONFIGURED" : "OFFLINE"}
+            <Badge
+              variant={geminiOk ? "success" : "outline"}
+              title={
+                geminiOk
+                  ? "Optional narrative auditor key configured"
+                  : "Not configured; deterministic monitoring and reasoning remain active"
+              }
+            >
+              {geminiOk ? "OPTIONAL · CONFIGURED" : "OPTIONAL · NOT CONFIGURED"}
             </Badge>
           </div>
+
+          <Badge
+            variant={webhookConfigured ? "success" : "outline"}
+            className="font-mono-nums text-[10px]"
+            title="Outbound escalation webhook integration"
+          >
+            Webhook {webhookConfigured ? "ready" : "not configured"}
+          </Badge>
 
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <Activity className="size-3.5" aria-hidden />
@@ -632,9 +758,9 @@ export default function App() {
                 ))}
               </select>
             </label>
-          ) : instruments[0] ? (
+          ) : selectedInstrument ? (
             <Badge variant="outline" className="font-mono-nums text-[10px]">
-              {instruments[0].label}
+              {selectedInstrument.label}
             </Badge>
           ) : null}
 
@@ -671,6 +797,11 @@ export default function App() {
             }`}
           >
             {tab}
+            {tab === "incidents" && incidentCount > 0 ? (
+              <span className="ml-1.5 rounded-full bg-amber-950/70 px-1.5 py-0.5 text-[9px] text-amber-300">
+                {incidentCount}
+              </span>
+            ) : null}
           </button>
         ))}
       </nav>
@@ -700,6 +831,14 @@ export default function App() {
                   {pulseSummaryLine}
                 </p>
               ) : null}
+              <p className="mt-2 max-w-5xl text-[10px] leading-relaxed text-zinc-600">
+                <span className="text-zinc-400">Filtered basis</span> estimates the
+                current log price relationship.{" "}
+                <span className="text-zinc-400">Innovation</span> is the new residual
+                versus that estimate.{" "}
+                <span className="text-zinc-400">Mahalanobis</span> normalizes the
+                residual by model uncertainty; it is not a default probability.
+              </p>
             </CardHeader>
             <CardContent className="min-h-0 flex-1 px-2 pb-2 pt-0">
               <div className="h-full min-h-[420px] w-full">
@@ -852,9 +991,18 @@ export default function App() {
                   </div>
                 ) : null}
               </div>
-              <span className="font-mono-nums text-[10px] text-zinc-600">
-                crit {criticalityRecentPct.toFixed(1)}%
-              </span>
+              <div className="flex items-center gap-3">
+                <span className="font-mono-nums text-[10px] text-zinc-600">
+                  crit {criticalityRecentPct.toFixed(1)}%
+                </span>
+                <button
+                  type="button"
+                  onClick={() => setActiveTab("incidents")}
+                  className="rounded-md border border-zinc-700 px-2.5 py-1.5 font-mono-nums text-[10px] uppercase tracking-wide text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"
+                >
+                  Review incidents{incidentCount > 0 ? ` (${incidentCount})` : ""}
+                </button>
+              </div>
             </div>
           </Card>
         </section>
@@ -863,11 +1011,7 @@ export default function App() {
         <IncidentsTab
           instrumentId={selectedInstrumentId || "default"}
           trace={traceBundle}
-          audits={audits.filter(
-            (audit) =>
-              (audit.instrument_id ?? "default") ===
-              (selectedInstrumentId || "default"),
-          )}
+          audits={selectedAudits}
           breachThreshold={mahalanobisBreachThreshold}
           criticalityWindowEvents={criticalityWindowEvents}
           criticalityAuditPct={criticalityAuditPct}

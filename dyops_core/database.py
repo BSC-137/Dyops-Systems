@@ -89,7 +89,9 @@ class PersistenceManager:
                 physical_price REAL NOT NULL,
                 token_price REAL NOT NULL,
                 innovation REAL,
-                mahalanobis_distance REAL
+                mahalanobis_distance REAL,
+                ingestion_source TEXT NOT NULL DEFAULT 'live',
+                scenario TEXT
             );
 
             CREATE TABLE IF NOT EXISTS audits (
@@ -109,6 +111,12 @@ class PersistenceManager:
             conn.execute(
                 "ALTER TABLE events ADD COLUMN instrument_id TEXT NOT NULL DEFAULT 'default'"
             )
+        if "ingestion_source" not in event_columns:
+            conn.execute(
+                "ALTER TABLE events ADD COLUMN ingestion_source TEXT NOT NULL DEFAULT 'live'"
+            )
+        if "scenario" not in event_columns:
+            conn.execute("ALTER TABLE events ADD COLUMN scenario TEXT")
         audit_columns = {
             str(row[1]) for row in conn.execute("PRAGMA table_info(audits)").fetchall()
         }
@@ -151,8 +159,8 @@ class PersistenceManager:
                         """
                         INSERT INTO events
                         (instrument_id, timestamp, physical_price, token_price, innovation,
-                         mahalanobis_distance)
-                        VALUES (?, ?, ?, ?, ?, ?)
+                         mahalanobis_distance, ingestion_source, scenario)
+                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                         """,
                         (
                             payload["instrument_id"],
@@ -161,6 +169,8 @@ class PersistenceManager:
                             float(payload["token_price"]),
                             payload.get("innovation"),
                             payload.get("mahalanobis_distance"),
+                            payload.get("ingestion_source", "live"),
+                            payload.get("scenario"),
                         ),
                     )
                     eid = int(cur.lastrowid)
@@ -183,11 +193,28 @@ class PersistenceManager:
                         """,
                         (instrument_id, ts, eid, report),
                     )
+                elif kind == "reset":
+                    instrument_id = str(payload["instrument_id"])
+                    conn.execute(
+                        "DELETE FROM audits WHERE instrument_id = ?",
+                        (instrument_id,),
+                    )
+                    conn.execute(
+                        "DELETE FROM events WHERE instrument_id = ?",
+                        (instrument_id,),
+                    )
+                    with self._latest_event_id_lock:
+                        self._latest_event_ids.pop(instrument_id, None)
                 conn.commit()
             except Exception as exc:  # noqa: BLE001
                 self._last_write_error = str(exc)
+                if kind == "reset":
+                    payload["error"] = str(exc)
                 logger.exception("Persistence write failed: {}", exc)
             finally:
+                completion = payload.get("completion")
+                if isinstance(completion, threading.Event):
+                    completion.set()
                 self._q.task_done()
 
         try:
@@ -204,6 +231,8 @@ class PersistenceManager:
         instrument_id: str = "default",
         innovation: float | None,
         mahalanobis_distance: float | None,
+        ingestion_source: str = "live",
+        scenario: str | None = None,
     ) -> None:
         with self._state_lock:
             if self._closed:
@@ -218,6 +247,8 @@ class PersistenceManager:
                         "token_price": token_price,
                         "innovation": innovation,
                         "mahalanobis_distance": mahalanobis_distance,
+                        "ingestion_source": ingestion_source,
+                        "scenario": scenario,
                     },
                 )
             )
@@ -259,7 +290,7 @@ class PersistenceManager:
                 cur = conn.execute(
                     """
                     SELECT instrument_id, timestamp, physical_price, token_price, innovation,
-                           mahalanobis_distance
+                           mahalanobis_distance, ingestion_source, scenario
                     FROM events
                     ORDER BY id DESC
                     LIMIT ?
@@ -270,7 +301,7 @@ class PersistenceManager:
                 cur = conn.execute(
                     """
                     SELECT instrument_id, timestamp, physical_price, token_price, innovation,
-                           mahalanobis_distance
+                           mahalanobis_distance, ingestion_source, scenario
                     FROM events
                     WHERE instrument_id = ?
                     ORDER BY id DESC
@@ -290,9 +321,36 @@ class PersistenceManager:
                 "token_price": r[3],
                 "innovation": r[4],
                 "mahalanobis_distance": r[5],
+                "ingestion_source": r[6],
+                "scenario": r[7],
             }
             for r in rows
         ]
+
+    def reset_instrument(self, instrument_id: str, timeout: float = 5.0) -> None:
+        """Delete one instrument's accepted history after earlier queued writes drain."""
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        completion = threading.Event()
+        payload: dict[str, Any] = {
+            "instrument_id": instrument_id,
+            "completion": completion,
+        }
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("PersistenceManager is closed")
+            self._q.put(
+                (
+                    "reset",
+                    payload,
+                )
+            )
+        if not completion.wait(timeout):
+            raise TimeoutError(
+                f"Persistence reset did not complete within {timeout:.3f} seconds"
+            )
+        if "error" in payload:
+            raise RuntimeError(f"Persistence reset failed: {payload['error']}")
 
     def load_recent_audits(
         self,
