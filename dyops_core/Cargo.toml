@@ -14,3 +14,7 @@ pyo3 = { version = "0.23", features = ["extension-module"] }
 
 [profile.release]
 lto = true
+
+[[bench]]
+name = "tick_hotpath"
+harness = false

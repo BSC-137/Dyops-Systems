@@ -1,12 +1,13 @@
 //! Discrete-time Kalman observer for a mean-reverting basis with Joseph-form covariance.
 
-use nalgebra::{Matrix3, RowVector3, Vector3};
-use std::collections::VecDeque;
+use nalgebra::{Matrix3, Vector3};
 
 use crate::sentinel::MAHALANOBIS_BREACH;
 
+const PHI_DT_EPSILON: f64 = f64::EPSILON * 8.0;
+
 /// Output of one filter step: filtered estimate, innovation, and normalized surprise (Mahalanobis).
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Copy, Debug, PartialEq)]
 pub struct SystemHealth {
     /// Posterior estimate of basis (log-ratio) after the update.
     pub filtered_basis: f64,
@@ -28,11 +29,9 @@ pub struct WindowStats {
 
 #[derive(Clone, Copy, Debug)]
 struct RingSample {
-    /// Retained for diagnostic series (e.g. future time-aligned export).
-    #[allow(dead_code)]
-    timestamp: f64,
     innovation: f64,
-    mahalanobis: f64,
+    breach: bool,
+    breach_prefix: u64,
 }
 
 /// Constructor configuration for [`BasisObserver`].
@@ -58,13 +57,17 @@ pub struct BasisObserver {
     x: Vector3<f64>,
     p: Matrix3<f64>,
     phi: Matrix3<f64>,
-    h: RowVector3<f64>,
+    phi_dt: Option<f64>,
     q: Matrix3<f64>,
     r: f64,
     last_t: Option<f64>,
     initialized: bool,
     ring_cap: usize,
-    ring: VecDeque<RingSample>,
+    ring: Vec<RingSample>,
+    ring_head: usize,
+    ring_breach_count: usize,
+    breach_prefix_total: u64,
+    breach_prefix_before_ring: u64,
 }
 
 impl BasisObserver {
@@ -95,13 +98,17 @@ impl BasisObserver {
             x: Vector3::zeros(),
             p: Matrix3::identity() * 1e4_f64,
             phi: Matrix3::identity(),
-            h: RowVector3::new(1.0, 0.0, 0.0),
+            phi_dt: None,
             q,
             r,
             last_t: None,
             initialized: false,
             ring_cap,
-            ring: VecDeque::new(),
+            ring: Vec::with_capacity(ring_cap),
+            ring_head: 0,
+            ring_breach_count: 0,
+            breach_prefix_total: 0,
+            breach_prefix_before_ring: 0,
         })
     }
 
@@ -119,12 +126,20 @@ impl BasisObserver {
                 kurtosis: f64::NAN,
             };
         }
-        let mut sum = 0.0;
-        for s in &self.ring {
-            sum += s.innovation;
+        let mut sum1 = 0.0_f64;
+        let mut sum2 = 0.0_f64;
+        let mut sum3 = 0.0_f64;
+        let mut sum4 = 0.0_f64;
+        for sample in self.ring_iter() {
+            let value = sample.innovation;
+            let squared = value * value;
+            sum1 += value;
+            sum2 += squared;
+            sum3 += squared * value;
+            sum4 += squared * squared;
         }
         let nf = n as f64;
-        let mean = sum / nf;
+        let mean = sum1 / nf;
         if n == 1 {
             return WindowStats {
                 mean,
@@ -132,21 +147,15 @@ impl BasisObserver {
                 kurtosis: f64::NAN,
             };
         }
-        let mut sq = 0.0;
-        for s in &self.ring {
-            let d = s.innovation - mean;
-            sq += d * d;
-        }
-        let variance = sq / (nf - 1.0);
+        let mean_squared = mean * mean;
+        let centered_m2 = (sum2 - nf * mean_squared).max(0.0);
+        let variance = centered_m2 / (nf - 1.0);
         let kurtosis = if n < 4 || variance <= 0.0 || !variance.is_finite() {
             f64::NAN
         } else {
-            let s = variance.sqrt();
-            let mut sum_z4 = 0.0;
-            for x in self.ring.iter().map(|r| r.innovation) {
-                let z = (x - mean) / s;
-                sum_z4 += z * z * z * z;
-            }
+            let centered_m4 = sum4 - 4.0 * mean * sum3 + 6.0 * mean_squared * sum2
+                - 3.0 * nf * mean_squared * mean_squared;
+            let sum_z4 = centered_m4 / (variance * variance);
             let n64 = nf;
             let num = n64 * (n64 + 1.0);
             let den = (n64 - 1.0) * (n64 - 2.0) * (n64 - 3.0);
@@ -165,12 +174,7 @@ impl BasisObserver {
         if self.ring.is_empty() || self.ring_cap == 0 {
             return 0.0;
         }
-        let hi = self
-            .ring
-            .iter()
-            .filter(|s| s.mahalanobis > MAHALANOBIS_BREACH)
-            .count();
-        100.0 * (hi as f64) / (self.ring.len() as f64)
+        100.0 * (self.ring_breach_count as f64) / (self.ring.len() as f64)
     }
 
     /// Up to `n` most recent innovation values (chronological order: oldest → newest in the returned slice).
@@ -180,7 +184,9 @@ impl BasisObserver {
         }
         let take = n.min(self.ring.len());
         let skip = self.ring.len() - take;
-        self.ring.iter().skip(skip).map(|s| s.innovation).collect()
+        (skip..self.ring.len())
+            .map(|index| self.ring_sample(index).innovation)
+            .collect()
     }
 
     /// Posterior filtered basis and velocity state components (`b`, `v` from `x = [b, v, μ]`).
@@ -194,13 +200,13 @@ impl BasisObserver {
             return 0.0;
         }
         let w = window.min(self.ring.len());
-        let skip = self.ring.len() - w;
-        let hi = self
-            .ring
-            .iter()
-            .skip(skip)
-            .filter(|s| s.mahalanobis > MAHALANOBIS_BREACH)
-            .count();
+        let latest_prefix = self.ring_sample(self.ring.len() - 1).breach_prefix;
+        let prefix_before_window = if self.ring.len() == w {
+            self.breach_prefix_before_ring
+        } else {
+            self.ring_sample(self.ring.len() - w - 1).breach_prefix
+        };
+        let hi = latest_prefix.wrapping_sub(prefix_before_window) as usize;
         100.0 * (hi as f64) / (w as f64)
     }
 
@@ -247,18 +253,56 @@ impl BasisObserver {
         (filtered_basis, innovation, mahalanobis_distance)
     }
 
-    fn push_ring(&mut self, timestamp: f64, h: &SystemHealth) {
+    fn push_ring(&mut self, _timestamp: f64, h: &SystemHealth) {
         if self.ring_cap == 0 {
             return;
         }
-        while self.ring.len() >= self.ring_cap {
-            self.ring.pop_front();
+        let breach = h.mahalanobis_distance > MAHALANOBIS_BREACH;
+        if breach {
+            self.breach_prefix_total = self.breach_prefix_total.wrapping_add(1);
         }
-        self.ring.push_back(RingSample {
-            timestamp,
+        let sample = RingSample {
             innovation: h.innovation,
-            mahalanobis: h.mahalanobis_distance,
-        });
+            breach,
+            breach_prefix: self.breach_prefix_total,
+        };
+        if self.ring.len() < self.ring_cap {
+            self.ring.push(sample);
+        } else {
+            let removed = self.ring[self.ring_head];
+            self.breach_prefix_before_ring = removed.breach_prefix;
+            if removed.breach {
+                self.ring_breach_count -= 1;
+            }
+            self.ring[self.ring_head] = sample;
+            self.ring_head = (self.ring_head + 1) % self.ring_cap;
+        }
+        if breach {
+            self.ring_breach_count += 1;
+        }
+    }
+
+    #[inline]
+    fn ring_sample(&self, logical_index: usize) -> &RingSample {
+        debug_assert!(logical_index < self.ring.len());
+        if self.ring.len() < self.ring_cap {
+            &self.ring[logical_index]
+        } else {
+            &self.ring[(self.ring_head + logical_index) % self.ring_cap]
+        }
+    }
+
+    #[inline]
+    fn ring_iter(
+        &self,
+    ) -> std::iter::Chain<std::slice::Iter<'_, RingSample>, std::slice::Iter<'_, RingSample>> {
+        if self.ring.len() < self.ring_cap {
+            self.ring.iter().chain(self.ring[0..0].iter())
+        } else {
+            self.ring[self.ring_head..]
+                .iter()
+                .chain(self.ring[..self.ring_head].iter())
+        }
     }
 
     fn compute_update(
@@ -303,40 +347,42 @@ impl BasisObserver {
         let dt = if dt_raw > 0.0 { dt_raw } else { 0.0 };
         self.last_t = Some(timestamp);
 
-        self.phi = if dt > 0.0 {
-            phi_matrix(self.theta, dt)
-        } else {
-            Matrix3::identity()
-        };
+        let cached_dt_matches = self.phi_dt.is_some_and(|cached| {
+            (cached - dt).abs() <= PHI_DT_EPSILON * cached.abs().max(dt.abs()).max(1.0)
+        });
+        if !cached_dt_matches {
+            self.phi = if dt > 0.0 {
+                phi_matrix(self.theta, dt)
+            } else {
+                Matrix3::identity()
+            };
+            self.phi_dt = Some(dt);
+        }
 
         // Predict
-        let x_pred = self.phi * self.x;
-        let p_pred = self.phi * self.p * self.phi.transpose() + self.q;
+        let x_pred = predict_state(&self.phi, &self.x);
+        let p_pred = predict_covariance(&self.phi, &self.p, &self.q);
 
         // Update (linear measurement H = [1,0,0])
-        let hx = (self.h * x_pred)[0];
-        let y_scalar = z - hx;
+        let y_scalar = z - x_pred[0];
 
         // S = H P H^T + R  (scalar)
-        let hpht = (self.h * p_pred * self.h.transpose())[0];
-        let s = hpht + self.r;
+        let s = p_pred[(0, 0)] + self.r;
 
         if s <= 0.0 || !s.is_finite() {
             return invalid_health(last_b);
         }
 
-        // Kalman gain K (3×1)
-        let k = p_pred * self.h.transpose() * (1.0 / s);
-
-        let i = Matrix3::identity();
-        let kh = outer_kw(&k, &self.h);
-        let a = i - kh;
-
-        // Joseph-form covariance update: P = (I-KH) P_pred (I-KH)^T + K R K^T.
-        // Scalar R: K R K^T = R * (K K^T).
-        let p_post = a * p_pred * a.transpose() + k * k.transpose() * self.r;
-
-        let x_post = x_pred + k * y_scalar;
+        let inverse_s = 1.0 / s;
+        let k0 = p_pred[(0, 0)] * inverse_s;
+        let k1 = p_pred[(1, 0)] * inverse_s;
+        let k2 = p_pred[(2, 0)] * inverse_s;
+        let p_post = joseph_covariance(&p_pred, [k0, k1, k2], self.r);
+        let x_post = Vector3::new(
+            x_pred[0] + k0 * y_scalar,
+            x_pred[1] + k1 * y_scalar,
+            x_pred[2] + k2 * y_scalar,
+        );
 
         self.x = x_post;
         self.p = symmetrize_psd(p_post);
@@ -392,28 +438,74 @@ fn phi_matrix(theta: f64, dt: f64) -> Matrix3<f64> {
     Matrix3::new(e11, e12, 1.0 - e11, e21, e22, -e21, 0.0, 0.0, 1.0)
 }
 
-fn symmetrize_psd(p: Matrix3<f64>) -> Matrix3<f64> {
-    0.5 * (p + p.transpose())
+#[inline]
+fn predict_state(phi: &Matrix3<f64>, x: &Vector3<f64>) -> Vector3<f64> {
+    Vector3::new(
+        phi[(0, 0)] * x[0] + phi[(0, 1)] * x[1] + phi[(0, 2)] * x[2],
+        phi[(1, 0)] * x[0] + phi[(1, 1)] * x[1] + phi[(1, 2)] * x[2],
+        phi[(2, 0)] * x[0] + phi[(2, 1)] * x[1] + phi[(2, 2)] * x[2],
+    )
 }
 
 #[inline]
-fn outer_kw(k: &Vector3<f64>, h: &RowVector3<f64>) -> Matrix3<f64> {
+fn predict_covariance(phi: &Matrix3<f64>, p: &Matrix3<f64>, q: &Matrix3<f64>) -> Matrix3<f64> {
+    let t00 = phi[(0, 0)] * p[(0, 0)] + phi[(0, 1)] * p[(1, 0)] + phi[(0, 2)] * p[(2, 0)];
+    let t01 = phi[(0, 0)] * p[(0, 1)] + phi[(0, 1)] * p[(1, 1)] + phi[(0, 2)] * p[(2, 1)];
+    let t02 = phi[(0, 0)] * p[(0, 2)] + phi[(0, 1)] * p[(1, 2)] + phi[(0, 2)] * p[(2, 2)];
+    let t10 = phi[(1, 0)] * p[(0, 0)] + phi[(1, 1)] * p[(1, 0)] + phi[(1, 2)] * p[(2, 0)];
+    let t11 = phi[(1, 0)] * p[(0, 1)] + phi[(1, 1)] * p[(1, 1)] + phi[(1, 2)] * p[(2, 1)];
+    let t12 = phi[(1, 0)] * p[(0, 2)] + phi[(1, 1)] * p[(1, 2)] + phi[(1, 2)] * p[(2, 2)];
+    let t20 = phi[(2, 0)] * p[(0, 0)] + phi[(2, 1)] * p[(1, 0)] + phi[(2, 2)] * p[(2, 0)];
+    let t21 = phi[(2, 0)] * p[(0, 1)] + phi[(2, 1)] * p[(1, 1)] + phi[(2, 2)] * p[(2, 1)];
+    let t22 = phi[(2, 0)] * p[(0, 2)] + phi[(2, 1)] * p[(1, 2)] + phi[(2, 2)] * p[(2, 2)];
+
     Matrix3::new(
-        k[0] * h[0],
-        k[0] * h[1],
-        k[0] * h[2],
-        k[1] * h[0],
-        k[1] * h[1],
-        k[1] * h[2],
-        k[2] * h[0],
-        k[2] * h[1],
-        k[2] * h[2],
+        t00 * phi[(0, 0)] + t01 * phi[(0, 1)] + t02 * phi[(0, 2)] + q[(0, 0)],
+        t00 * phi[(1, 0)] + t01 * phi[(1, 1)] + t02 * phi[(1, 2)] + q[(0, 1)],
+        t00 * phi[(2, 0)] + t01 * phi[(2, 1)] + t02 * phi[(2, 2)] + q[(0, 2)],
+        t10 * phi[(0, 0)] + t11 * phi[(0, 1)] + t12 * phi[(0, 2)] + q[(1, 0)],
+        t10 * phi[(1, 0)] + t11 * phi[(1, 1)] + t12 * phi[(1, 2)] + q[(1, 1)],
+        t10 * phi[(2, 0)] + t11 * phi[(2, 1)] + t12 * phi[(2, 2)] + q[(1, 2)],
+        t20 * phi[(0, 0)] + t21 * phi[(0, 1)] + t22 * phi[(0, 2)] + q[(2, 0)],
+        t20 * phi[(1, 0)] + t21 * phi[(1, 1)] + t22 * phi[(1, 2)] + q[(2, 1)],
+        t20 * phi[(2, 0)] + t21 * phi[(2, 1)] + t22 * phi[(2, 2)] + q[(2, 2)],
     )
+}
+
+#[inline]
+fn joseph_covariance(p: &Matrix3<f64>, k: [f64; 3], r: f64) -> Matrix3<f64> {
+    let a00 = 1.0 - k[0];
+    let t00 = a00 * p[(0, 0)];
+    let t01 = a00 * p[(0, 1)];
+    let t02 = a00 * p[(0, 2)];
+    let t10 = p[(1, 0)] - k[1] * p[(0, 0)];
+    let t11 = p[(1, 1)] - k[1] * p[(0, 1)];
+    let t12 = p[(1, 2)] - k[1] * p[(0, 2)];
+    let t20 = p[(2, 0)] - k[2] * p[(0, 0)];
+    let t21 = p[(2, 1)] - k[2] * p[(0, 1)];
+    let t22 = p[(2, 2)] - k[2] * p[(0, 2)];
+
+    Matrix3::new(
+        t00 * a00 + r * k[0] * k[0],
+        t01 - t00 * k[1] + r * k[0] * k[1],
+        t02 - t00 * k[2] + r * k[0] * k[2],
+        t10 * a00 + r * k[1] * k[0],
+        t11 - t10 * k[1] + r * k[1] * k[1],
+        t12 - t10 * k[2] + r * k[1] * k[2],
+        t20 * a00 + r * k[2] * k[0],
+        t21 - t20 * k[1] + r * k[2] * k[1],
+        t22 - t20 * k[2] + r * k[2] * k[2],
+    )
+}
+
+fn symmetrize_psd(p: Matrix3<f64>) -> Matrix3<f64> {
+    0.5 * (p + p.transpose())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use nalgebra::RowVector3;
 
     #[test]
     fn phi_row_sums_mean_level() {
@@ -563,5 +655,158 @@ mod tests {
             o.criticality_recent(crate::sentinel::CRITICALITY_WINDOW),
             before
         );
+    }
+
+    #[test]
+    fn running_criticality_matches_naive_scan_after_wraparound() {
+        let mut o = BasisObserver::new(ObserverInit {
+            name: "criticality-wrap".into(),
+            theta: 1.0,
+            q_process: None,
+            r_measurement: Some(1e-8),
+            ring_buffer_capacity: Some(32),
+        })
+        .unwrap();
+        for tick in 0..300 {
+            let token = if tick % 11 < 3 { 82.0 } else { 100.0 };
+            o.update(tick as f64, 100.0, token);
+            for window in [1, 5, 20, 32, 100] {
+                let width = window.min(o.ring.len());
+                let naive = if width == 0 {
+                    0.0
+                } else {
+                    let breaches = (o.ring.len() - width..o.ring.len())
+                        .filter(|index| o.ring_sample(*index).breach)
+                        .count();
+                    100.0 * breaches as f64 / width as f64
+                };
+                assert_eq!(o.criticality_recent(window), naive);
+            }
+            let naive_full = if o.ring.is_empty() {
+                0.0
+            } else {
+                let breaches = (0..o.ring.len())
+                    .filter(|index| o.ring_sample(*index).breach)
+                    .count();
+                100.0 * breaches as f64 / o.ring.len() as f64
+            };
+            assert_eq!(o.criticality_score(), naive_full);
+        }
+    }
+
+    #[test]
+    fn single_pass_window_stats_match_reference() {
+        let mut o = BasisObserver::new(ObserverInit {
+            name: "window-stats".into(),
+            theta: 1.0,
+            q_process: None,
+            r_measurement: Some(1e-7),
+            ring_buffer_capacity: Some(64),
+        })
+        .unwrap();
+        for tick in 0..200 {
+            let physical = 100.0 + ((tick * 17) % 29) as f64 * 0.002;
+            let token = 100.0 + ((tick * 11) % 23) as f64 * 0.001;
+            o.update(tick as f64, physical, token);
+        }
+        let values: Vec<f64> = o.ring_iter().map(|sample| sample.innovation).collect();
+        let count = values.len() as f64;
+        let mean = values.iter().sum::<f64>() / count;
+        let variance = values
+            .iter()
+            .map(|value| (value - mean).powi(2))
+            .sum::<f64>()
+            / (count - 1.0);
+        let sum_z4 = values
+            .iter()
+            .map(|value| ((value - mean) / variance.sqrt()).powi(4))
+            .sum::<f64>();
+        let kurtosis = (count * (count + 1.0) / ((count - 1.0) * (count - 2.0) * (count - 3.0)))
+            * sum_z4
+            - 3.0 * (count - 1.0).powi(2) / ((count - 2.0) * (count - 3.0));
+        let actual = o.window_stats();
+        assert!((actual.mean - mean).abs() < 1e-15);
+        assert!((actual.variance - variance).abs() < 1e-18);
+        assert!((actual.kurtosis - kurtosis).abs() < 1e-8);
+    }
+
+    #[test]
+    fn specialized_kalman_matches_nalgebra_reference() {
+        let mut optimized = BasisObserver::new(ObserverInit {
+            name: "specialized-parity".into(),
+            theta: 0.7,
+            q_process: None,
+            r_measurement: Some(1e-6),
+            ring_buffer_capacity: Some(0),
+        })
+        .unwrap();
+        let h = RowVector3::new(1.0, 0.0, 0.0);
+        let q = optimized.q;
+        let r = optimized.r;
+        let mut reference_x = Vector3::zeros();
+        let mut reference_p = Matrix3::identity() * 1e4;
+        let mut reference_last_t: Option<f64> = None;
+        let mut initialized = false;
+
+        for tick in 0..5000 {
+            let timestamp = if tick % 97 == 0 {
+                tick as f64 * 0.001 + 0.000_000_3
+            } else {
+                tick as f64 * 0.001
+            };
+            let physical = 100.0 + ((tick % 31) as f64 - 15.0) * 1e-4;
+            let token = 100.0 + ((tick % 19) as f64 - 9.0) * 7e-5;
+            let z = (physical / token).ln();
+
+            let expected = if !initialized {
+                initialized = true;
+                reference_last_t = Some(timestamp);
+                reference_x = Vector3::new(z, 0.0, z);
+                reference_p = Matrix3::from_diagonal(&Vector3::new(r * 10.0, r * 100.0, r * 10.0));
+                SystemHealth {
+                    filtered_basis: z,
+                    innovation: 0.0,
+                    mahalanobis_distance: 0.0,
+                    measurement_valid: true,
+                }
+            } else {
+                let dt_raw = timestamp - reference_last_t.unwrap();
+                let dt = if dt_raw > 0.0 { dt_raw } else { 0.0 };
+                reference_last_t = Some(timestamp);
+                let phi = if dt > 0.0 {
+                    phi_matrix(0.7, dt)
+                } else {
+                    Matrix3::identity()
+                };
+                let x_pred = phi * reference_x;
+                let p_pred = phi * reference_p * phi.transpose() + q;
+                let innovation = z - (h * x_pred)[0];
+                let s = (h * p_pred * h.transpose())[0] + r;
+                let k = p_pred * h.transpose() * (1.0 / s);
+                let kh = Matrix3::new(k[0], 0.0, 0.0, k[1], 0.0, 0.0, k[2], 0.0, 0.0);
+                let a = Matrix3::identity() - kh;
+                reference_p = symmetrize_psd(a * p_pred * a.transpose() + k * k.transpose() * r);
+                reference_x = x_pred + k * innovation;
+                SystemHealth {
+                    filtered_basis: reference_x[0],
+                    innovation,
+                    mahalanobis_distance: innovation.abs() / s.max(1e-300).sqrt(),
+                    measurement_valid: true,
+                }
+            };
+
+            let actual = optimized.update(timestamp, physical, token);
+            assert!((actual.filtered_basis - expected.filtered_basis).abs() < 1e-12);
+            assert!((actual.innovation - expected.innovation).abs() < 1e-12);
+            assert!((actual.mahalanobis_distance - expected.mahalanobis_distance).abs() < 1e-12);
+            for row in 0..3 {
+                assert!((optimized.x[row] - reference_x[row]).abs() < 1e-12);
+                for column in 0..3 {
+                    assert!(
+                        (optimized.p[(row, column)] - reference_p[(row, column)]).abs() < 1e-12
+                    );
+                }
+            }
+        }
     }
 }

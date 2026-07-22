@@ -1,0 +1,25 @@
+{
+  "python": "3.10.12",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "release_build_required": true,
+  "results": [
+    {
+      "case": "python_sentinel_monitoring_persistence_off",
+      "ticks": 200000,
+      "elapsed_ns": 177865401,
+      "ns_per_tick": 889.327005,
+      "ticks_per_sec": 1124445.7824599624,
+      "checksum": -6.0457749700399614e-05
+    },
+    {
+      "case": "python_sentinel_monitoring_persistence_enqueue",
+      "ticks": 20000,
+      "elapsed_ns": 30599060,
+      "ns_per_tick": 1529.953,
+      "ticks_per_sec": 653614.8496064912,
+      "checksum": -1.8328568732076653e-05,
+      "end_to_end_ns": 129912958,
+      "end_to_end_ns_per_tick": 6495.6479
+    }
+  ]
+}

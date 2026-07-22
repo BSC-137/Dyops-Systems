@@ -433,6 +433,69 @@ class DyopsDetector(Detector):
             "observer_only": self.observer_only,
         }
 
+    def run(self, rows: tuple[Observation, ...]) -> list[DetectionTick]:
+        production_policy = (
+            not self.observer_only
+            and self.theta == 1.0
+            and self.process_noise_scale == 1.0
+            and self.measurement_noise == 1e-6
+            and self.mahalanobis_threshold == float(dyops_core.MAHALANOBIS_BREACH)
+            and self.criticality_window == int(dyops_core.CRITICALITY_WINDOW)
+            and self.criticality_audit_pct
+            == float(dyops_core.CRITICALITY_AUDIT_PCT)
+            and self.warmup_events == 0
+        )
+        if not production_policy or not rows:
+            return super().run(rows)
+
+        self.reset()
+        core = dyops_core.DyopsSentinelCore(
+            self._observer,
+            criticality_window=self.criticality_window,
+            audit_criticality_pct=self.criticality_audit_pct,
+        )
+        batch = core.process_batch(
+            np.ascontiguousarray([row.timestamp for row in rows], dtype=np.float64),
+            np.ascontiguousarray(
+                [row.physical_price for row in rows],
+                dtype=np.float64,
+            ),
+            np.ascontiguousarray([row.token_price for row in rows], dtype=np.float64),
+        )
+        levels = ("MONITORING", "BREACH", "AUDIT")
+        ticks: list[DetectionTick] = []
+        for tick, row in enumerate(rows):
+            valid = bool(batch["measurement_valid"][tick])
+            score = (
+                float(batch["mahalanobis_distance"][tick]) if valid else None
+            )
+            metadata = {
+                "criticality_recent_pct": float(
+                    batch["criticality_recent_pct"][tick]
+                ),
+            }
+            if valid:
+                metadata.update(
+                    {
+                        "innovation": float(batch["innovation"][tick]),
+                        "filtered_basis": float(batch["filtered_basis"][tick]),
+                    }
+                )
+            ticks.append(
+                DetectionTick(
+                    self.name,
+                    row.instrument_id,
+                    tick,
+                    row.timestamp,
+                    valid,
+                    _basis(row) if valid else None,
+                    score,
+                    levels[int(batch["level"][tick])],
+                    metadata,
+                )
+            )
+        return ticks
+
     def step(self, tick: int, row: Observation) -> DetectionTick:
         health = self._observer.update(
             row.timestamp,

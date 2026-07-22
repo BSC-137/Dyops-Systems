@@ -1,0 +1,9 @@
+{
+  "ticks": 100000,
+  "serial_ns_per_tick": 3517.34811,
+  "batch_ns_per_tick": 3440.22164,
+  "serial_ticks_per_sec": 284305.09825198964,
+  "batch_ticks_per_sec": 290678.9459065201,
+  "speedup": 1.022419041001091,
+  "exact_tick_parity": true
+}

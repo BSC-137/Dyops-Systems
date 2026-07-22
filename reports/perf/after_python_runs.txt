@@ -1,0 +1,75 @@
+{
+  "python": "3.10.12",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "release_build_required": true,
+  "results": [
+    {
+      "case": "python_sentinel_monitoring_persistence_off",
+      "ticks": 200000,
+      "elapsed_ns": 181931623,
+      "ns_per_tick": 909.658115,
+      "ticks_per_sec": 1099314.1087956985,
+      "checksum": -6.0457749700399614e-05
+    },
+    {
+      "case": "python_sentinel_monitoring_persistence_enqueue",
+      "ticks": 20000,
+      "elapsed_ns": 35174868,
+      "ns_per_tick": 1758.7434,
+      "ticks_per_sec": 568587.7769320982,
+      "checksum": -1.8328568732076653e-05,
+      "end_to_end_ns": 138905231,
+      "end_to_end_ns_per_tick": 6945.26155
+    }
+  ]
+}
+{
+  "python": "3.10.12",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "release_build_required": true,
+  "results": [
+    {
+      "case": "python_sentinel_monitoring_persistence_off",
+      "ticks": 200000,
+      "elapsed_ns": 177865401,
+      "ns_per_tick": 889.327005,
+      "ticks_per_sec": 1124445.7824599624,
+      "checksum": -6.0457749700399614e-05
+    },
+    {
+      "case": "python_sentinel_monitoring_persistence_enqueue",
+      "ticks": 20000,
+      "elapsed_ns": 30599060,
+      "ns_per_tick": 1529.953,
+      "ticks_per_sec": 653614.8496064912,
+      "checksum": -1.8328568732076653e-05,
+      "end_to_end_ns": 129912958,
+      "end_to_end_ns_per_tick": 6495.6479
+    }
+  ]
+}
+{
+  "python": "3.10.12",
+  "platform": "Linux-5.15.167.4-microsoft-standard-WSL2-x86_64-with-glibc2.35",
+  "release_build_required": true,
+  "results": [
+    {
+      "case": "python_sentinel_monitoring_persistence_off",
+      "ticks": 200000,
+      "elapsed_ns": 186009047,
+      "ns_per_tick": 930.045235,
+      "ticks_per_sec": 1075216.518904051,
+      "checksum": -6.0457749700399614e-05
+    },
+    {
+      "case": "python_sentinel_monitoring_persistence_enqueue",
+      "ticks": 20000,
+      "elapsed_ns": 31777721,
+      "ns_per_tick": 1588.88605,
+      "ticks_per_sec": 629371.7538775043,
+      "checksum": -1.8328568732076653e-05,
+      "end_to_end_ns": 128285292,
+      "end_to_end_ns_per_tick": 6414.2646
+    }
+  ]
+}

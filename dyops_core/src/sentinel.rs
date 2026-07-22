@@ -23,6 +23,14 @@ impl EventLevel {
             Self::Audit => "AUDIT",
         }
     }
+
+    pub fn as_u8(self) -> u8 {
+        match self {
+            Self::Monitoring => 0,
+            Self::Breach => 1,
+            Self::Audit => 2,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq)]
@@ -43,6 +51,17 @@ pub struct SentinelEvent {
     pub criticality_recent_pct: f64,
     pub snapshot: Option<SentinelSnapshot>,
     pub breach: bool,
+}
+
+pub struct SentinelBatch {
+    pub filtered_basis: Vec<f64>,
+    pub innovation: Vec<f64>,
+    pub mahalanobis_distance: Vec<f64>,
+    pub measurement_valid: Vec<bool>,
+    pub level: Vec<u8>,
+    pub criticality_recent_pct: Vec<f64>,
+    pub breach: Vec<bool>,
+    pub snapshot_emitted: Vec<bool>,
 }
 
 pub struct SentinelPolicy {
@@ -125,6 +144,43 @@ impl SentinelPolicy {
             snapshot,
             breach,
         }
+    }
+
+    pub fn process_batch_slice(
+        &mut self,
+        timestamps: &[f64],
+        physical: &[f64],
+        token: &[f64],
+    ) -> SentinelBatch {
+        let count = timestamps.len();
+        debug_assert_eq!(count, physical.len());
+        debug_assert_eq!(count, token.len());
+        let mut batch = SentinelBatch {
+            filtered_basis: Vec::with_capacity(count),
+            innovation: Vec::with_capacity(count),
+            mahalanobis_distance: Vec::with_capacity(count),
+            measurement_valid: Vec::with_capacity(count),
+            level: Vec::with_capacity(count),
+            criticality_recent_pct: Vec::with_capacity(count),
+            breach: Vec::with_capacity(count),
+            snapshot_emitted: Vec::with_capacity(count),
+        };
+        for index in 0..count {
+            let event = self.process_event(timestamps[index], physical[index], token[index]);
+            batch.filtered_basis.push(event.health.filtered_basis);
+            batch.innovation.push(event.health.innovation);
+            batch
+                .mahalanobis_distance
+                .push(event.health.mahalanobis_distance);
+            batch.measurement_valid.push(event.health.measurement_valid);
+            batch.level.push(event.level.as_u8());
+            batch
+                .criticality_recent_pct
+                .push(event.criticality_recent_pct);
+            batch.breach.push(event.breach);
+            batch.snapshot_emitted.push(event.snapshot.is_some());
+        }
+        batch
     }
 
     fn build_snapshot(
@@ -297,6 +353,65 @@ mod tests {
             let event = policy.process_event(tick as f64, 100.0, 0.0);
             assert!(!event.health.measurement_valid);
             assert_eq!(event.level, EventLevel::Audit);
+        }
+    }
+
+    #[test]
+    fn policy_batch_matches_serial_events() {
+        let init = ObserverInit {
+            name: "policy-batch".into(),
+            theta: 1.0,
+            q_process: None,
+            r_measurement: Some(1e-6),
+            ring_buffer_capacity: Some(1000),
+        };
+        let mut serial = SentinelPolicy::new(
+            BasisObserver::new(init.clone()).unwrap(),
+            CRITICALITY_WINDOW,
+            CRITICALITY_AUDIT_PCT,
+            AUDIT_COOLDOWN_TICKS,
+        )
+        .unwrap();
+        let mut batch = SentinelPolicy::new(
+            BasisObserver::new(init).unwrap(),
+            CRITICALITY_WINDOW,
+            CRITICALITY_AUDIT_PCT,
+            AUDIT_COOLDOWN_TICKS,
+        )
+        .unwrap();
+        let timestamps: Vec<f64> = (0..240).map(|tick| tick as f64).collect();
+        let physical = vec![100.0; 240];
+        let token: Vec<f64> = (0..240)
+            .map(|tick| {
+                if (120..160).contains(&tick) {
+                    90.0
+                } else {
+                    100.0
+                }
+            })
+            .collect();
+        let expected: Vec<SentinelEvent> = (0..timestamps.len())
+            .map(|index| serial.process_event(timestamps[index], physical[index], token[index]))
+            .collect();
+        let actual = batch.process_batch_slice(&timestamps, &physical, &token);
+        for (index, event) in expected.iter().enumerate() {
+            assert_eq!(actual.filtered_basis[index], event.health.filtered_basis);
+            assert_eq!(actual.innovation[index], event.health.innovation);
+            assert_eq!(
+                actual.mahalanobis_distance[index],
+                event.health.mahalanobis_distance
+            );
+            assert_eq!(
+                actual.measurement_valid[index],
+                event.health.measurement_valid
+            );
+            assert_eq!(actual.level[index], event.level.as_u8());
+            assert_eq!(
+                actual.criticality_recent_pct[index],
+                event.criticality_recent_pct
+            );
+            assert_eq!(actual.breach[index], event.breach);
+            assert_eq!(actual.snapshot_emitted[index], event.snapshot.is_some());
         }
     }
 }

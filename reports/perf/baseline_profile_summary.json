@@ -1,0 +1,36 @@
+{
+  "tool": "py-spy 0.4.2",
+  "sample_rate_hz": 1000,
+  "ticks": 1000000,
+  "samples": 2549,
+  "errors": 0,
+  "profile": "baseline_replay.speedscope.json",
+  "top_python_leaf_frames_pct": [
+    {
+      "frame": "DyopsSentinel.process_event -> Rust/PyO3 call",
+      "location": "dyops_core/sentinel.py:148",
+      "percent": 18.47
+    },
+    {
+      "frame": "EventResult construction/return",
+      "location": "dyops_core/sentinel.py:205",
+      "percent": 7.88
+    },
+    {
+      "frame": "benchmark result field access",
+      "location": "dyops_core/bench_sentinel_tick.py:47",
+      "percent": 7.84
+    },
+    {
+      "frame": "SentinelLevel enum lookup",
+      "location": "python enum.py:440",
+      "percent": 3.84
+    },
+    {
+      "frame": "non-snapshot level branch",
+      "location": "dyops_core/sentinel.py:186",
+      "percent": 2.88
+    }
+  ],
+  "interpretation": "The dominant visible stack is the PyO3 process_event boundary. Python-side dict access, enum lookup, EventResult construction, and benchmark field access are material. Native Rust time is attributed to the calling Python frame by py-spy."
+}

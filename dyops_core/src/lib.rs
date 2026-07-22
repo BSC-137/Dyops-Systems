@@ -8,8 +8,9 @@ mod sentinel;
 
 pub use observer::{BasisObserver, ObserverInit, SystemHealth, WindowStats};
 pub use sentinel::{
-    EventLevel, SentinelEvent, SentinelPolicy, SentinelSnapshot, AUDIT_COOLDOWN_TICKS,
-    CRITICALITY_AUDIT_PCT, CRITICALITY_WINDOW, INNOVATION_STREAM_LEN, MAHALANOBIS_BREACH,
+    EventLevel, SentinelBatch, SentinelEvent, SentinelPolicy, SentinelSnapshot,
+    AUDIT_COOLDOWN_TICKS, CRITICALITY_AUDIT_PCT, CRITICALITY_WINDOW, INNOVATION_STREAM_LEN,
+    MAHALANOBIS_BREACH,
 };
 
 use numpy::{PyArray1, PyReadonlyArray1};
@@ -185,6 +186,81 @@ impl PyDyopsSentinelCore {
             Some(snapshot) => result.set_item("snapshot", snapshot_to_pydict(py, snapshot)?)?,
             None => result.set_item("snapshot", py.None())?,
         }
+        Ok(result.unbind())
+    }
+
+    fn process_event_compact<'py>(
+        &mut self,
+        py: Python<'py>,
+        timestamp: f64,
+        physical_price: f64,
+        token_price: f64,
+    ) -> PyResult<(u8, Py<PySystemHealth>, f64, Option<Py<PyDict>>, bool)> {
+        let event = self
+            .inner
+            .process_event(timestamp, physical_price, token_price);
+        let level = event.level.as_u8();
+        let health = Py::new(py, PySystemHealth::from(event.health))?;
+        let snapshot = event
+            .snapshot
+            .map(|value| snapshot_to_pydict(py, value).map(Bound::unbind))
+            .transpose()?;
+        Ok((
+            level,
+            health,
+            event.criticality_recent_pct,
+            snapshot,
+            event.breach,
+        ))
+    }
+
+    #[pyo3(signature = (timestamps, physical, token))]
+    fn process_batch<'py>(
+        &mut self,
+        py: Python<'py>,
+        timestamps: PyReadonlyArray1<'py, f64>,
+        physical: PyReadonlyArray1<'py, f64>,
+        token: PyReadonlyArray1<'py, f64>,
+    ) -> PyResult<Py<PyDict>> {
+        let timestamps = timestamps
+            .as_slice()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let physical = physical
+            .as_slice()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        let token = token
+            .as_slice()
+            .map_err(|error| PyValueError::new_err(error.to_string()))?;
+        if timestamps.len() != physical.len() || timestamps.len() != token.len() {
+            return Err(PyValueError::new_err(
+                "timestamps, physical, and token arrays must have the same length",
+            ));
+        }
+        let batch = self.inner.process_batch_slice(timestamps, physical, token);
+        let result = PyDict::new(py);
+        result.set_item(
+            "filtered_basis",
+            PyArray1::from_vec(py, batch.filtered_basis),
+        )?;
+        result.set_item("innovation", PyArray1::from_vec(py, batch.innovation))?;
+        result.set_item(
+            "mahalanobis_distance",
+            PyArray1::from_vec(py, batch.mahalanobis_distance),
+        )?;
+        result.set_item(
+            "measurement_valid",
+            PyArray1::from_vec(py, batch.measurement_valid),
+        )?;
+        result.set_item("level", PyArray1::from_vec(py, batch.level))?;
+        result.set_item(
+            "criticality_recent_pct",
+            PyArray1::from_vec(py, batch.criticality_recent_pct),
+        )?;
+        result.set_item("breach", PyArray1::from_vec(py, batch.breach))?;
+        result.set_item(
+            "snapshot_emitted",
+            PyArray1::from_vec(py, batch.snapshot_emitted),
+        )?;
         Ok(result.unbind())
     }
 

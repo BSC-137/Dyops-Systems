@@ -53,6 +53,7 @@ function TabFallback({ label }: { label: string }) {
 }
 
 const MAX_POINTS = 500
+const TELEMETRY_PAINT_INTERVAL_MS = 100
 
 /**
  * Tail slice passed to LineChart only. Older points stay in chartDataRef for buffering
@@ -208,11 +209,42 @@ export default function App() {
   const forensicRefreshTimersRef =
     useRef<ReturnType<typeof setTimeout>[]>([])
   const previousDemoActiveRef = useRef(false)
+  const pendingTelemetryRef = useRef<TelemetryPayload | null>(null)
+  const telemetryPaintTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mergeChart = useCallback((point: ChartPoint) => {
     chartDataRef.current = [...chartDataRef.current, point].slice(-MAX_POINTS)
     setChartData(chartDataRef.current)
   }, [])
+
+  const queueTelemetryPaint = useCallback(
+    (payload: TelemetryPayload) => {
+      pendingTelemetryRef.current = payload
+      if (telemetryPaintTimerRef.current !== null) return
+      telemetryPaintTimerRef.current = setTimeout(() => {
+        telemetryPaintTimerRef.current = null
+        const latest = pendingTelemetryRef.current
+        pendingTelemetryRef.current = null
+        if (latest === null) return
+        mergeChart({
+          t: latest.timestamp,
+          measured_basis: measuredBasisFromPrices(
+            latest.physical_price,
+            latest.token_price,
+          ),
+          filtered_basis: latest.health.filtered_basis,
+          innovation: latest.health.innovation,
+          mahalanobis: latest.health.mahalanobis_distance,
+        })
+        setSentinelLevel(latest.level)
+        setCriticalityRecentPct(latest.criticality_recent_pct)
+        setIngestionSource(latest.ingestion_source)
+        setDemoScenario(latest.demo_scenario ?? null)
+      }, TELEMETRY_PAINT_INTERVAL_MS)
+    },
+    [mergeChart],
+  )
 
   useEffect(() => {
     let cancelled = false
@@ -339,20 +371,7 @@ export default function App() {
           ) {
             return
           }
-          mergeChart({
-            t: p.timestamp,
-            measured_basis: measuredBasisFromPrices(
-              p.physical_price,
-              p.token_price,
-            ),
-            filtered_basis: p.health.filtered_basis,
-            innovation: p.health.innovation,
-            mahalanobis: p.health.mahalanobis_distance,
-          })
-          setSentinelLevel(p.level)
-          setCriticalityRecentPct(p.criticality_recent_pct)
-          setIngestionSource(p.ingestion_source)
-          setDemoScenario(p.demo_scenario ?? null)
+          queueTelemetryPaint(p)
           if (p.level !== "MONITORING" || p.snapshot !== null) {
             scheduleForensicRefresh()
           }
@@ -392,8 +411,13 @@ export default function App() {
       }
       forensicRefreshTimersRef.current.forEach(clearTimeout)
       forensicRefreshTimersRef.current = []
+      if (telemetryPaintTimerRef.current !== null) {
+        clearTimeout(telemetryPaintTimerRef.current)
+        telemetryPaintTimerRef.current = null
+      }
+      pendingTelemetryRef.current = null
     }
-  }, [mergeChart, scheduleForensicRefresh, selectedInstrumentId])
+  }, [queueTelemetryPaint, scheduleForensicRefresh, selectedInstrumentId])
 
   const upsertAudit = useCallback((row: AuditRow) => {
     const m = auditsRef.current

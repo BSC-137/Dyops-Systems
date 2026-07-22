@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import math
 import os
 import re
 import uuid
@@ -36,12 +37,11 @@ CRITICALITY_WINDOW_EVENTS = int(dyops_core.CRITICALITY_WINDOW)
 CRITICALITY_WINDOW_TICKS = CRITICALITY_WINDOW_EVENTS  # deprecated alias
 CRITICALITY_AUDIT_PCT = float(dyops_core.CRITICALITY_AUDIT_PCT)
 AUDIT_COOLDOWN_TICKS = int(dyops_core.AUDIT_COOLDOWN_TICKS)
+BREACH_LOG_SAMPLE_TICKS = 100
 
 
 def _json_safe_float(x: float) -> float | None:
-    if x != x or x in (float("inf"), float("-inf")):
-        return None
-    return x
+    return x if math.isfinite(x) else None
 
 
 class SentinelLevel(IntEnum):
@@ -52,7 +52,14 @@ class SentinelLevel(IntEnum):
     AUDIT = 3
 
 
-@dataclass
+_SENTINEL_LEVEL_BY_CODE = (
+    SentinelLevel.MONITORING,
+    SentinelLevel.BREACH,
+    SentinelLevel.AUDIT,
+)
+
+
+@dataclass(slots=True)
 class EventResult:
     """Outcome of a single telemetry event (`process_event` / `process_event_async`)."""
 
@@ -102,6 +109,8 @@ class DyopsSentinel:
         self.on_audit = on_audit
         self.persistence = persistence
         self.instrument_id = instrument_id
+        self._event_count = 0
+        self._last_level = SentinelLevel.MONITORING
 
     def _maybe_schedule_audit(self, snapshot: dict[str, Any]) -> None:
         """Fire-and-forget audit when a running asyncio loop exists (sync `process_event`)."""
@@ -145,19 +154,22 @@ class DyopsSentinel:
         """
         Delegate one telemetry packet to Rust, then run Python-only integrations.
         """
-        core_result = self._core.process_event(
-            timestamp,
-            physical_price,
-            token_price,
+        level_code, health, crit_recent, snapshot, breach = (
+            self._core.process_event_compact(
+                timestamp,
+                physical_price,
+                token_price,
+            )
         )
-        health = core_result["health"]
-        crit_recent = float(core_result["criticality_recent_pct"])
-        level = SentinelLevel[core_result["level"]]
-        snapshot = core_result["snapshot"]
+        level = _SENTINEL_LEVEL_BY_CODE[level_code]
+        self._event_count += 1
+        transitioned = level != self._last_level
 
-        if core_result["breach"]:
-            logger.opt(colors=True).info(
-                "<red>🔴 BREACH DETECTED</red> | mahalanobis={:.4f} | innovation={:.6f}",
+        if breach and (
+            transitioned or self._event_count % BREACH_LOG_SAMPLE_TICKS == 0
+        ):
+            logger.info(
+                "Breach detected | mahalanobis={:.4f} | innovation={:.6f}",
                 health.mahalanobis_distance,
                 health.innovation,
             )
@@ -172,7 +184,7 @@ class DyopsSentinel:
                 }
             )
             logger.warning(
-                "<yellow>🟠 AUDIT SNAPSHOT</yellow> | last {} telemetry packets "
+                "Audit snapshot | last {} telemetry packets "
                 "criticality {:.2f}% (> {:.1f}%) | cooldown {} ticks",
                 self.criticality_window,
                 crit_recent,
@@ -183,12 +195,6 @@ class DyopsSentinel:
                 self.on_audit(snapshot)
             if schedule_background_audit:
                 self._maybe_schedule_audit(snapshot)
-        elif level == SentinelLevel.BREACH:
-            logger.debug(
-                "Breach captured | basis={:.6f} | innovation={:.6f}",
-                health.filtered_basis,
-                health.innovation,
-            )
 
         if self.persistence is not None:
             self.persistence.schedule_event(
@@ -202,6 +208,7 @@ class DyopsSentinel:
                 scenario=scenario,
             )
 
+        self._last_level = level
         return EventResult(
             level=level,
             health=health,

@@ -20,6 +20,8 @@ from loguru import logger
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "dyops_ts.db"
 REPLAY_WINDOW_EVENTS = 1000
 _CLOSE = object()
+_WRITE_BATCH_MAX = 256
+_WRITE_BATCH_WAIT_SEC = 0.002
 
 
 class PersistenceManager:
@@ -29,7 +31,9 @@ class PersistenceManager:
 
     def __init__(self, db_path: Path | str | None = None) -> None:
         self._path = Path(db_path) if db_path else DEFAULT_DB_PATH
-        self._q: queue.Queue[tuple[str, dict[str, Any]] | object] = queue.Queue()
+        self._q: queue.SimpleQueue[tuple[str, Any] | object] = (
+            queue.SimpleQueue()
+        )
         self._ready = threading.Event()
         self._state_lock = threading.Lock()
         self._closed = False
@@ -37,6 +41,9 @@ class PersistenceManager:
         self._last_write_error: str | None = None
         self._latest_event_id_lock = threading.Lock()
         self._latest_event_ids: dict[str, int] = {}
+        self._event_counts_lock = threading.Lock()
+        self._event_counts: dict[str, int] = {}
+        self._global_event_count = 0
         self._thread = threading.Thread(target=self._writer_loop, name="dyops-sqlite", daemon=True)
         self._thread.start()
         if not self._ready.wait(timeout=5.0):
@@ -140,6 +147,25 @@ class PersistenceManager:
         try:
             conn = self._connect()
             self._init_schema(conn)
+            count_rows = conn.execute(
+                """
+                SELECT instrument_id, COUNT(*), MAX(id)
+                FROM events
+                GROUP BY instrument_id
+                """
+            ).fetchall()
+            with self._event_counts_lock:
+                self._event_counts = {
+                    str(instrument_id): int(count)
+                    for instrument_id, count, _ in count_rows
+                }
+                self._global_event_count = sum(self._event_counts.values())
+            with self._latest_event_id_lock:
+                self._latest_event_ids = {
+                    str(instrument_id): int(latest_id)
+                    for instrument_id, _, latest_id in count_rows
+                    if latest_id is not None
+                }
         except Exception as exc:  # noqa: BLE001
             self._init_error = exc
             logger.exception("Persistence init failed: {}", exc)
@@ -147,75 +173,110 @@ class PersistenceManager:
             return
         self._ready.set()
 
-        while True:
-            item = self._q.get()
-            if item is _CLOSE:
-                self._q.task_done()
-                break
-            kind, payload = item
+        closing = False
+        while not closing:
+            batch = [self._q.get()]
+            batch_deadline = time.monotonic() + _WRITE_BATCH_WAIT_SEC
+            while len(batch) < _WRITE_BATCH_MAX and batch[-1] is not _CLOSE:
+                timeout = batch_deadline - time.monotonic()
+                if timeout <= 0.0:
+                    break
+                try:
+                    batch.append(self._q.get(timeout=timeout))
+                except queue.Empty:
+                    break
+                if batch[-1] is _CLOSE:
+                    break
+            writes = [item for item in batch if item is not _CLOSE]
+            closing = any(item is _CLOSE for item in batch)
+            with self._event_counts_lock:
+                next_counts = dict(self._event_counts)
+            with self._latest_event_id_lock:
+                next_latest_ids = dict(self._latest_event_ids)
             try:
-                if kind == "event":
-                    cur = conn.execute(
-                        """
-                        INSERT INTO events
-                        (instrument_id, timestamp, physical_price, token_price, innovation,
-                         mahalanobis_distance, ingestion_source, scenario)
-                        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
-                        """,
-                        (
-                            payload["instrument_id"],
-                            float(payload["timestamp"]),
-                            float(payload["physical_price"]),
-                            float(payload["token_price"]),
-                            payload.get("innovation"),
-                            payload.get("mahalanobis_distance"),
-                            payload.get("ingestion_source", "live"),
-                            payload.get("scenario"),
-                        ),
-                    )
-                    eid = int(cur.lastrowid)
-                    with self._latest_event_id_lock:
-                        self._latest_event_ids[payload["instrument_id"]] = eid
-                elif kind == "audit":
-                    ts = float(payload.get("timestamp") or time.time())
-                    instrument_id = str(payload.get("instrument_id") or "default")
-                    report = payload["report_json"]
-                    if not isinstance(report, str):
-                        report = json.dumps(report, allow_nan=False)
-                    eid = payload.get("event_id")
-                    if eid is None:
-                        with self._latest_event_id_lock:
-                            eid = self._latest_event_ids.get(instrument_id)
-                    conn.execute(
-                        """
-                        INSERT INTO audits (instrument_id, timestamp, event_id, report_json)
-                        VALUES (?, ?, ?, ?)
-                        """,
-                        (instrument_id, ts, eid, report),
-                    )
-                elif kind == "reset":
-                    instrument_id = str(payload["instrument_id"])
-                    conn.execute(
-                        "DELETE FROM audits WHERE instrument_id = ?",
-                        (instrument_id,),
-                    )
-                    conn.execute(
-                        "DELETE FROM events WHERE instrument_id = ?",
-                        (instrument_id,),
-                    )
-                    with self._latest_event_id_lock:
-                        self._latest_event_ids.pop(instrument_id, None)
+                conn.execute("BEGIN")
+                index = 0
+                while index < len(writes):
+                    kind, payload = writes[index]
+                    if kind == "event":
+                        event_payloads: list[tuple[Any, ...]] = []
+                        while index < len(writes) and writes[index][0] == "event":
+                            event_payloads.append(writes[index][1])
+                            index += 1
+                        conn.executemany(
+                            """
+                            INSERT INTO events
+                            (instrument_id, timestamp, physical_price, token_price,
+                             innovation, mahalanobis_distance, ingestion_source, scenario)
+                            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                            """,
+                            event_payloads,
+                        )
+                        last_id = int(
+                            conn.execute("SELECT last_insert_rowid()").fetchone()[0]
+                        )
+                        first_id = last_id - len(event_payloads) + 1
+                        for offset, event in enumerate(event_payloads):
+                            instrument_id = str(event[0])
+                            next_latest_ids[instrument_id] = first_id + offset
+                            next_counts[instrument_id] = (
+                                next_counts.get(instrument_id, 0) + 1
+                            )
+                        continue
+                    if kind == "audit":
+                        timestamp = float(payload.get("timestamp") or time.time())
+                        instrument_id = str(
+                            payload.get("instrument_id") or "default"
+                        )
+                        report = payload["report_json"]
+                        if not isinstance(report, str):
+                            report = json.dumps(report, allow_nan=False)
+                        event_id = payload.get("event_id")
+                        if event_id is None:
+                            event_id = next_latest_ids.get(instrument_id)
+                        conn.execute(
+                            """
+                            INSERT INTO audits
+                            (instrument_id, timestamp, event_id, report_json)
+                            VALUES (?, ?, ?, ?)
+                            """,
+                            (instrument_id, timestamp, event_id, report),
+                        )
+                    elif kind == "reset":
+                        instrument_id = str(payload["instrument_id"])
+                        conn.execute(
+                            "DELETE FROM audits WHERE instrument_id = ?",
+                            (instrument_id,),
+                        )
+                        conn.execute(
+                            "DELETE FROM events WHERE instrument_id = ?",
+                            (instrument_id,),
+                        )
+                        next_latest_ids.pop(instrument_id, None)
+                        next_counts.pop(instrument_id, None)
+                    index += 1
                 conn.commit()
+                with self._event_counts_lock:
+                    self._event_counts = next_counts
+                    self._global_event_count = sum(next_counts.values())
+                with self._latest_event_id_lock:
+                    self._latest_event_ids = next_latest_ids
             except Exception as exc:  # noqa: BLE001
+                conn.rollback()
                 self._last_write_error = str(exc)
-                if kind == "reset":
-                    payload["error"] = str(exc)
+                for item in writes:
+                    kind, payload = item
+                    if kind == "reset":
+                        payload["error"] = str(exc)
                 logger.exception("Persistence write failed: {}", exc)
             finally:
-                completion = payload.get("completion")
-                if isinstance(completion, threading.Event):
-                    completion.set()
-                self._q.task_done()
+                for item in batch:
+                    if item is not _CLOSE:
+                        _, payload = item
+                        if isinstance(payload, dict):
+                            completion = payload.get("completion")
+                            if isinstance(completion, threading.Event):
+                                completion.set()
 
         try:
             conn.close()
@@ -240,16 +301,16 @@ class PersistenceManager:
             self._q.put(
                 (
                     "event",
-                    {
-                        "instrument_id": instrument_id,
-                        "timestamp": timestamp,
-                        "physical_price": physical_price,
-                        "token_price": token_price,
-                        "innovation": innovation,
-                        "mahalanobis_distance": mahalanobis_distance,
-                        "ingestion_source": ingestion_source,
-                        "scenario": scenario,
-                    },
+                    (
+                        instrument_id,
+                        float(timestamp),
+                        float(physical_price),
+                        float(token_price),
+                        innovation,
+                        mahalanobis_distance,
+                        ingestion_source,
+                        scenario,
+                    ),
                 )
             )
 
@@ -439,20 +500,11 @@ class PersistenceManager:
         return out
 
     def count_events(self, instrument_id: str | None = None) -> int:
-        conn = self._connect()
-        try:
-            self._init_schema(conn)
+        """Return the writer-reconciled committed event count without SQL."""
+        with self._event_counts_lock:
             if instrument_id is None:
-                cur = conn.execute("SELECT COUNT(*) FROM events")
-            else:
-                cur = conn.execute(
-                    "SELECT COUNT(*) FROM events WHERE instrument_id = ?",
-                    (instrument_id,),
-                )
-            row = cur.fetchone()
-            return int(row[0]) if row else 0
-        finally:
-            conn.close()
+                return self._global_event_count
+            return self._event_counts.get(instrument_id, 0)
 
     def get_max_audit_id(self) -> int:
         conn = self._connect()

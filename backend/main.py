@@ -30,6 +30,7 @@ if str(_DYOPS_PY) not in sys.path:
     sys.path.insert(0, str(_DYOPS_PY))
 
 import dyops_core  # noqa: E402
+import numpy as np  # noqa: E402
 from loguru import logger  # noqa: E402
 from binance_feed import feed_threads_disabled, start_configured_feed_threads  # noqa: E402
 from database import PersistenceManager, REPLAY_WINDOW_EVENTS  # noqa: E402
@@ -52,6 +53,7 @@ _PULSE_SUMMARY_MAX = 200
 _PULSE_EXPLAIN_MAX = 280
 STALE_CUTOFF_SEC = 12.0
 _INGEST_LOG_INTERVAL_SEC = 5.0
+_TELEMETRY_FLUSH_INTERVAL_SEC = 0.05
 SOFTWARE_VERSION = "1.0.0"
 
 
@@ -231,6 +233,8 @@ class ConnectionHub:
     def __init__(self) -> None:
         self._telemetry: dict[WebSocket, str | None] = {}
         self._audits: set[WebSocket] = set()
+        self._pending_telemetry: dict[str, dict[str, Any]] = {}
+        self._telemetry_flush_task: asyncio.Task[None] | None = None
         self._lock = asyncio.Lock()
 
     async def register_telemetry(
@@ -254,25 +258,66 @@ class ConnectionHub:
             self._audits.discard(ws)
 
     async def broadcast_telemetry(self, payload: dict[str, Any]) -> None:
-        raw = json.dumps(
-            {"type": "telemetry", "payload": payload},
-            allow_nan=False,
-            default=str,
-        )
+        await self._send_telemetry_batch((payload,))
+
+    async def queue_telemetry(self, payload: dict[str, Any]) -> None:
+        instrument_id = str(payload.get("instrument_id") or "default")
         async with self._lock:
-            dead: list[WebSocket] = []
-            for ws, instrument_id in self._telemetry.items():
-                if (
-                    instrument_id is not None
-                    and instrument_id != payload.get("instrument_id")
-                ):
-                    continue
+            self._pending_telemetry[instrument_id] = payload
+            if (
+                self._telemetry_flush_task is None
+                or self._telemetry_flush_task.done()
+            ):
+                self._telemetry_flush_task = asyncio.create_task(
+                    self._flush_telemetry_after_interval()
+                )
+
+    async def _flush_telemetry_after_interval(self) -> None:
+        await asyncio.sleep(_TELEMETRY_FLUSH_INTERVAL_SEC)
+        async with self._lock:
+            self._telemetry_flush_task = None
+        await self.flush_telemetry()
+
+    async def flush_telemetry(self) -> None:
+        async with self._lock:
+            flush_task = self._telemetry_flush_task
+            self._telemetry_flush_task = None
+            pending = tuple(self._pending_telemetry.values())
+            self._pending_telemetry.clear()
+        if flush_task is not None and flush_task is not asyncio.current_task():
+            flush_task.cancel()
+        if pending:
+            await self._send_telemetry_batch(pending)
+
+    async def _send_telemetry_batch(
+        self,
+        payloads: tuple[dict[str, Any], ...],
+    ) -> None:
+        async with self._lock:
+            subscribers = tuple(self._telemetry.items())
+        dead: list[WebSocket] = []
+        for payload in payloads:
+            interested = [
+                ws
+                for ws, instrument_id in subscribers
+                if instrument_id is None
+                or instrument_id == payload.get("instrument_id")
+            ]
+            if not interested:
+                continue
+            raw = json.dumps(
+                {"type": "telemetry", "payload": payload},
+                allow_nan=False,
+            )
+            for ws in interested:
                 try:
                     await ws.send_text(raw)
                 except Exception:  # noqa: BLE001
                     dead.append(ws)
-            for ws in dead:
-                self._telemetry.pop(ws, None)
+        if dead:
+            async with self._lock:
+                for ws in dead:
+                    self._telemetry.pop(ws, None)
 
     async def broadcast_audit(self, payload: dict[str, Any]) -> None:
         raw = json.dumps(
@@ -354,11 +399,20 @@ def _replay_observer_state(
         REPLAY_WINDOW_EVENTS,
         instrument_id=instrument_id,
     )
-    for row in rows:
-        observer.update(
-            float(row["timestamp"]),
-            float(row["physical_price"]),
-            float(row["token_price"]),
+    if rows:
+        observer.update_batch(
+            np.ascontiguousarray(
+                [row["timestamp"] for row in rows],
+                dtype=np.float64,
+            ),
+            np.ascontiguousarray(
+                [row["physical_price"] for row in rows],
+                dtype=np.float64,
+            ),
+            np.ascontiguousarray(
+                [row["token_price"] for row in rows],
+                dtype=np.float64,
+            ),
         )
     return observer
 
@@ -560,6 +614,7 @@ async def _telemetry_pump() -> None:
             if is_demo and demo_last:
                 _demo_injection_active = False
             continue
+        previous_level = runtime.level
         try:
             result = runtime.sentinel.process_event(
                 ts,
@@ -610,7 +665,9 @@ async def _telemetry_pump() -> None:
                 model,
                 session_event_count=runtime.session_event_count,
             )
-        await hub.broadcast_telemetry(model)
+        await hub.queue_telemetry(model)
+        if result.snapshot is not None or result.level.name != previous_level:
+            await hub.flush_telemetry()
         if delay_after > 0.0:
             await asyncio.sleep(delay_after)
         if is_demo and demo_last:

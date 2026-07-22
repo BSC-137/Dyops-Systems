@@ -1,0 +1,5 @@
+case,iterations,total_ns,ns_per_tick,ticks_per_sec,checksum
+observer_monitoring_ring_off,1000000,63782011,63.782,15678402,-0.000082144
+observer_monitoring_ring_on,1000000,67446350,67.446,14826599,-0.000082144
+sentinel_monitoring,1000000,86926106,86.926,11504024,-0.000082144
+sentinel_audit_snapshot_tick,100000,247407603,2474.076,404191,0.000073926
