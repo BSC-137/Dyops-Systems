@@ -18,6 +18,8 @@ from loguru import logger
 
 
 DEFAULT_DB_PATH = Path(__file__).resolve().parent / "dyops_ts.db"
+REPLAY_WINDOW_EVENTS = 1000
+_CLOSE = object()
 
 
 class PersistenceManager:
@@ -27,18 +29,49 @@ class PersistenceManager:
 
     def __init__(self, db_path: Path | str | None = None) -> None:
         self._path = Path(db_path) if db_path else DEFAULT_DB_PATH
-        self._q: queue.Queue[tuple[str, dict[str, Any]]] = queue.Queue()
-        self._stop = threading.Event()
+        self._q: queue.Queue[tuple[str, dict[str, Any]] | object] = queue.Queue()
         self._ready = threading.Event()
+        self._state_lock = threading.Lock()
+        self._closed = False
+        self._init_error: BaseException | None = None
+        self._last_write_error: str | None = None
         self._latest_event_id_lock = threading.Lock()
         self._latest_event_ids: dict[str, int] = {}
         self._thread = threading.Thread(target=self._writer_loop, name="dyops-sqlite", daemon=True)
         self._thread.start()
-        self._ready.wait(timeout=5.0)
+        if not self._ready.wait(timeout=5.0):
+            raise TimeoutError("Persistence writer initialization timed out")
+        if self._init_error is not None:
+            raise RuntimeError(
+                f"Persistence writer initialization failed: {self._init_error}"
+            ) from self._init_error
 
     @property
     def db_path(self) -> Path:
         return self._path
+
+    @property
+    def queue_depth(self) -> int:
+        """Number of accepted writes still waiting for the writer."""
+        return self._q.qsize()
+
+    @property
+    def healthy(self) -> bool:
+        """Whether initialization succeeded and no asynchronous write has failed."""
+        return (
+            self._ready.is_set()
+            and self._init_error is None
+            and self._last_write_error is None
+            and (self._thread.is_alive() or self._closed)
+        )
+
+    @property
+    def last_error(self) -> str | None:
+        return (
+            str(self._init_error)
+            if self._init_error is not None
+            else self._last_write_error
+        )
 
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(self._path, check_same_thread=False)
@@ -100,16 +133,18 @@ class PersistenceManager:
             conn = self._connect()
             self._init_schema(conn)
         except Exception as exc:  # noqa: BLE001
+            self._init_error = exc
             logger.exception("Persistence init failed: {}", exc)
             self._ready.set()
             return
         self._ready.set()
 
-        while not self._stop.is_set():
-            try:
-                kind, payload = self._q.get(timeout=0.35)
-            except queue.Empty:
-                continue
+        while True:
+            item = self._q.get()
+            if item is _CLOSE:
+                self._q.task_done()
+                break
+            kind, payload = item
             try:
                 if kind == "event":
                     cur = conn.execute(
@@ -150,7 +185,10 @@ class PersistenceManager:
                     )
                 conn.commit()
             except Exception as exc:  # noqa: BLE001
+                self._last_write_error = str(exc)
                 logger.exception("Persistence write failed: {}", exc)
+            finally:
+                self._q.task_done()
 
         try:
             conn.close()
@@ -167,19 +205,22 @@ class PersistenceManager:
         innovation: float | None,
         mahalanobis_distance: float | None,
     ) -> None:
-        self._q.put(
-            (
-                "event",
-                {
-                    "instrument_id": instrument_id,
-                    "timestamp": timestamp,
-                    "physical_price": physical_price,
-                    "token_price": token_price,
-                    "innovation": innovation,
-                    "mahalanobis_distance": mahalanobis_distance,
-                },
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("PersistenceManager is closed")
+            self._q.put(
+                (
+                    "event",
+                    {
+                        "instrument_id": instrument_id,
+                        "timestamp": timestamp,
+                        "physical_price": physical_price,
+                        "token_price": token_price,
+                        "innovation": innovation,
+                        "mahalanobis_distance": mahalanobis_distance,
+                    },
+                )
             )
-        )
 
     def schedule_audit(
         self,
@@ -189,17 +230,20 @@ class PersistenceManager:
         event_id: int | None = None,
         instrument_id: str = "default",
     ) -> None:
-        self._q.put(
-            (
-                "audit",
-                {
-                    "instrument_id": instrument_id,
-                    "timestamp": timestamp,
-                    "report_json": report_json,
-                    "event_id": event_id,
-                },
+        with self._state_lock:
+            if self._closed:
+                raise RuntimeError("PersistenceManager is closed")
+            self._q.put(
+                (
+                    "audit",
+                    {
+                        "instrument_id": instrument_id,
+                        "timestamp": timestamp,
+                        "report_json": report_json,
+                        "event_id": event_id,
+                    },
+                )
             )
-        )
 
     def load_recent_events(
         self,
@@ -361,5 +405,16 @@ class PersistenceManager:
         finally:
             conn.close()
 
-    def close(self) -> None:
-        self._stop.set()
+    def close(self, timeout: float = 5.0) -> None:
+        """Drain accepted writes and stop the writer within ``timeout`` seconds."""
+        if timeout < 0:
+            raise ValueError("timeout must be non-negative")
+        with self._state_lock:
+            if not self._closed:
+                self._closed = True
+                self._q.put(_CLOSE)
+        self._thread.join(timeout=timeout)
+        if self._thread.is_alive():
+            raise TimeoutError(
+                f"Persistence writer did not stop within {timeout:.3f} seconds"
+            )

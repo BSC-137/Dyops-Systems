@@ -1,6 +1,6 @@
 # Dyops Robustness Evidence Report
 
-Generated at: `2026-07-17T04:15:27.478109+00:00`
+Generated at: `2026-07-22T12:27:49.218614+00:00`
 
 ## Configuration
 
@@ -14,14 +14,14 @@ Generated at: `2026-07-17T04:15:27.478109+00:00`
 
 | scenario | pass/fail | breach_count | time_to_first_breach | max_mahalanobis | replay_error | processing_ms_per_1k |
 |---|---:|---:|---:|---:|---:|---:|
-| stable_tracking | PASS | 0 | — | 0.207037 | 0 | 12.2601 |
-| slow_drift | PASS | 0 | — | 2.07491 | 0 | 16.0853 |
-| sudden_depeg | PASS | 15 | 0 | 18.2793 | 0 | 21.1293 |
-| gradual_then_break | PASS | 15 | 100 | 16.0067 | 0 | 23.6123 |
-| oracle_lag | PASS | 3 | 15 | 4.07722 | 0 | 24.0312 |
-| stale_feed | PASS | 0 | — | 0.200326 | 0 | 14.7595 |
-| recovery_after_shock | PASS | 15 | 0 | 18.1502 | 0 | 26.131 |
-| fat_tail_noise | PASS | 15 | 0 | 15.6352 | 0 | 13.7391 |
+| stable_tracking | PASS | 0 | — | 0.207037 | 0 | 3.395 |
+| slow_drift | PASS | 0 | — | 2.07491 | 0 | 3.98495 |
+| sudden_depeg | PASS | 15 | 0 | 18.2793 | 0 | 7.77129 |
+| gradual_then_break | PASS | 15 | 100 | 16.0067 | 0 | 4.32902 |
+| oracle_lag | PASS | 3 | 15 | 4.07722 | 0 | 4.11605 |
+| stale_feed | PASS | 0 | — | 0.200326 | 0 | 3.46248 |
+| recovery_after_shock | PASS | 15 | 0 | 18.1502 | 0 | 5.03601 |
+| fat_tail_noise | PASS | 15 | 0 | 15.6352 | 0 | 4.48051 |
 
 ## Summary
 

@@ -73,6 +73,10 @@ def client(
         }
         api._session_event_count = 0
         api._last_tick_monotonic = 0.0
+        api._dropped_tick_count = 0
+        api._processing_error_count = 0
+        api._last_ingest_log_at.clear()
+        api._demo_injection_active = False
 
         pump = asyncio.create_task(api._telemetry_pump())
         try:
@@ -91,6 +95,7 @@ def client(
             api._primary_instrument_id = "default"
             api._session_event_count = 0
             api._last_tick_monotonic = 0.0
+            api._demo_injection_active = False
             _drain_telemetry_queue()
 
     monkeypatch.setattr(api.app.router, "lifespan_context", test_lifespan)
@@ -121,6 +126,11 @@ def test_status_uses_sentinel_breach_threshold(client: TestClient) -> None:
         response.json()["mahalanobis_breach_threshold"]
         == sentinel.MAHALANOBIS_BREACH
     )
+    assert response.json()["persistence_healthy"] is True
+    assert response.json()["persistence_queue_depth"] >= 0
+    assert response.json()["telemetry_queue_depth"] >= 0
+    assert response.json()["dropped_tick_count"] == 0
+    assert response.json()["replay_window_events"] == api.REPLAY_WINDOW_EVENTS
 
 
 def test_instruments_and_scoped_history(
@@ -214,6 +224,7 @@ def test_breach_sends_webhook_but_monitoring_does_not(
     assert payload["level"] == "BREACH"
     assert payload["mahalanobis"] > sentinel.MAHALANOBIS_BREACH
     assert payload["instrument_id"] == "default"
+    assert payload["ingestion_source"] == "live"
     assert {
         "timestamp",
         "innovation",
@@ -276,6 +287,7 @@ def test_telemetry_websocket_receives_event_result(client: TestClient) -> None:
         "token_price",
         "session_event_index",
         "instrument_id",
+        "ingestion_source",
     } <= payload.keys()
     assert {
         "filtered_basis",
@@ -289,6 +301,7 @@ def test_telemetry_websocket_receives_event_result(client: TestClient) -> None:
     assert payload["token_price"] == 99.0
     assert payload["session_event_index"] == 1
     assert payload["instrument_id"] == "default"
+    assert payload["ingestion_source"] == "live"
 
 
 def test_demo_injection_is_guarded_and_emits_breach(
@@ -302,16 +315,58 @@ def test_demo_injection_is_guarded_and_emits_breach(
     assert disabled.status_code == 404
 
     monkeypatch.setenv("DYOPS_DEMO_INJECT", "1")
+    monkeypatch.setenv("DYOPS_DEMO_SECRET", "contract-secret")
+    webhook_models: list[dict[str, object]] = []
+    monkeypatch.setattr(
+        api,
+        "_schedule_escalation_webhook",
+        lambda model, **_: webhook_models.append(model),
+    )
+    unauthorized = client.post(
+        "/api/demo/inject_scenario",
+        params={"name": "sudden_depeg"},
+    )
+    assert unauthorized.status_code == 401
     with client.websocket_connect("/ws/telemetry") as websocket:
         response = client.post(
             "/api/demo/inject_scenario",
             params={"name": "sudden_depeg", "seed": 13},
+            headers={"X-Dyops-Demo-Secret": "contract-secret"},
         )
         assert response.status_code == 202
 
         for _ in range(response.json()["ticks_queued"]):
             message = websocket.receive_json()
+            assert message["payload"]["ingestion_source"] == "demo"
+            assert message["payload"]["demo_scenario"] == "sudden_depeg"
             if message["payload"]["level"] == "BREACH":
                 break
         else:
             pytest.fail("sudden_depeg injection did not emit a BREACH telemetry event")
+    assert webhook_models == []
+
+
+def test_ingestion_errors_and_drops_are_counted(client: TestClient) -> None:
+    api._telemetry_queue.put(("missing", 1.0, 100.0, 100.0))
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if client.get("/api/status").json()["dropped_tick_count"] == 1:
+            break
+        time.sleep(0.01)
+    assert client.get("/api/status").json()["dropped_tick_count"] == 1
+
+    runtime = api._instrument_runtimes["default"]
+    original = runtime.sentinel.process_event
+
+    def fail_once(*args: object, **kwargs: object) -> object:
+        runtime.sentinel.process_event = original
+        raise ValueError("bad telemetry")
+
+    runtime.sentinel.process_event = fail_once  # type: ignore[method-assign]
+    api._telemetry_queue.put((2.0, 100.0, 100.0))
+    deadline = time.monotonic() + 1.0
+    while time.monotonic() < deadline:
+        if client.get("/api/status").json()["processing_error_count"] == 1:
+            break
+        time.sleep(0.01)
+    assert client.get("/api/status").json()["processing_error_count"] == 1

@@ -81,9 +81,7 @@ impl BasisObserver {
         let theta = init.theta;
         let q = if let Some(qf) = init.q_process {
             Matrix3::new(
-                qf[0], qf[1], qf[2],
-                qf[3], qf[4], qf[5],
-                qf[6], qf[7], qf[8],
+                qf[0], qf[1], qf[2], qf[3], qf[4], qf[5], qf[6], qf[7], qf[8],
             )
         } else {
             Matrix3::from_diagonal(&Vector3::new(1e-8_f64, 1e-6_f64, 1e-10_f64))
@@ -182,11 +180,7 @@ impl BasisObserver {
         }
         let take = n.min(self.ring.len());
         let skip = self.ring.len() - take;
-        self.ring
-            .iter()
-            .skip(skip)
-            .map(|s| s.innovation)
-            .collect()
+        self.ring.iter().skip(skip).map(|s| s.innovation).collect()
     }
 
     /// Posterior filtered basis and velocity state components (`b`, `v` from `x = [b, v, μ]`).
@@ -210,13 +204,21 @@ impl BasisObserver {
         100.0 * (hi as f64) / (w as f64)
     }
 
-    /// One Kalman step. Invalid prices yield `measurement_valid: false` and do not mutate the filter.
+    /// One Kalman step. Invalid prices yield `measurement_valid: false` and do not mutate the
+    /// filter or the valid-observation diagnostics ring.
     ///
     /// Implemented in Rust so this hot path avoids GC pauses: per-tick cost stays predictable under
     /// continuous ingestion, which stabilizes latency for timely state during volatile basis moves.
-    pub fn update(&mut self, timestamp: f64, physical_price: f64, token_price: f64) -> SystemHealth {
+    pub fn update(
+        &mut self,
+        timestamp: f64,
+        physical_price: f64,
+        token_price: f64,
+    ) -> SystemHealth {
         let h = self.compute_update(timestamp, physical_price, token_price);
-        self.push_ring(timestamp, &h);
+        if h.measurement_valid {
+            self.push_ring(timestamp, &h);
+        }
         h
     }
 
@@ -235,16 +237,14 @@ impl BasisObserver {
         let mut mahalanobis_distance = Vec::with_capacity(n);
         for i in 0..n {
             let h = self.compute_update(timestamps[i], physical[i], token[i]);
-            self.push_ring(timestamps[i], &h);
+            if h.measurement_valid {
+                self.push_ring(timestamps[i], &h);
+            }
             filtered_basis.push(h.filtered_basis);
             innovation.push(h.innovation);
             mahalanobis_distance.push(h.mahalanobis_distance);
         }
-        (
-            filtered_basis,
-            innovation,
-            mahalanobis_distance,
-        )
+        (filtered_basis, innovation, mahalanobis_distance)
     }
 
     fn push_ring(&mut self, timestamp: f64, h: &SystemHealth) {
@@ -284,11 +284,8 @@ impl BasisObserver {
         if !self.initialized {
             self.last_t = Some(timestamp);
             self.x = Vector3::new(z, 0.0, z);
-            self.p = Matrix3::from_diagonal(&Vector3::new(
-                self.r * 10.0,
-                self.r * 100.0,
-                self.r * 10.0,
-            ));
+            self.p =
+                Matrix3::from_diagonal(&Vector3::new(self.r * 10.0, self.r * 100.0, self.r * 10.0));
             self.initialized = true;
             return SystemHealth {
                 filtered_basis: z,
@@ -392,11 +389,7 @@ fn phi_matrix(theta: f64, dt: f64) -> Matrix3<f64> {
     let e21 = e * (-dt * theta * theta);
     let e22 = e * (1.0 - dt * theta);
 
-    Matrix3::new(
-        e11, e12, 1.0 - e11,
-        e21, e22, -e21,
-        0.0, 0.0, 1.0,
-    )
+    Matrix3::new(e11, e12, 1.0 - e11, e21, e22, -e21, 0.0, 0.0, 1.0)
 }
 
 fn symmetrize_psd(p: Matrix3<f64>) -> Matrix3<f64> {
@@ -537,5 +530,38 @@ mod tests {
         assert!(crit > 1.0 && crit < 15.0, "crit={crit}");
         let ws = o.window_stats();
         assert!(ws.mean.is_finite());
+    }
+
+    #[test]
+    fn invalid_ticks_do_not_dilute_recent_criticality() {
+        let init = ObserverInit {
+            name: "invalid-ring".into(),
+            theta: 1.0,
+            q_process: None,
+            r_measurement: Some(1e-8),
+            ring_buffer_capacity: Some(100),
+        };
+        let mut o = BasisObserver::new(init).unwrap();
+        for tick in 0..20 {
+            o.update(tick as f64, 100.0, 100.0);
+        }
+        for tick in 20..40 {
+            o.update(tick as f64, 130.0, 100.0);
+        }
+        let before = o.criticality_recent(crate::sentinel::CRITICALITY_WINDOW);
+        assert!(
+            before > crate::sentinel::CRITICALITY_AUDIT_PCT,
+            "criticality={before}"
+        );
+
+        for tick in 40..240 {
+            let health = o.update(tick as f64, 100.0, 0.0);
+            assert!(!health.measurement_valid);
+        }
+
+        assert_eq!(
+            o.criticality_recent(crate::sentinel::CRITICALITY_WINDOW),
+            before
+        );
     }
 }

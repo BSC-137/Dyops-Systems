@@ -9,7 +9,11 @@ and robustness scenario suite.
 
 For each timestamp, Dyops receives a physical/reference price and a token price. Prices
 must be finite and positive. Invalid measurements are marked as invalid and do not
-advance the filter state.
+advance the filter state, filter timestamp, or valid-observation diagnostics ring.
+Invalid ticks are therefore tracked by measurement-validity and ingestion counters,
+not inserted as zero-surprise samples. They neither increase nor dilute rolling
+criticality; an AUDIT window remains elevated through a prolonged invalid-data gap
+until enough subsequent valid observations change the window.
 
 The observer transforms valid prices into **log-basis**:
 
@@ -60,6 +64,24 @@ at most once every 25 ticks. A new transition into AUDIT always emits immediatel
 This cooldown avoids duplicate evidence and repeated external work without masking the
 duration of the elevated state. It is not a claim that the underlying condition has
 recovered, and it does not alter BREACH or AUDIT counts.
+
+## Replay-window policy
+
+Startup restoration and forensic history APIs use the same bounded window: the most
+recent **1,000 persisted events per instrument**, replayed oldest-first. API callers
+may request a smaller forensic suffix, but cannot request more than 1,000 events.
+The bound matches the observer diagnostics-ring capacity, avoids unbounded startup,
+and makes restored live observer state agree with forensic replay for the same window.
+Transient side-effect state such as an in-flight webhook task is not replayed.
+
+## Demo telemetry boundary
+
+Scenario injection is synthetic, disabled unless `DYOPS_DEMO_INJECT=1`, and protected
+by `DYOPS_DEMO_SECRET`. Injected WebSocket telemetry is additively labeled with
+`ingestion_source: "demo"` and `demo_scenario`; live events use
+`ingestion_source: "live"`. Demo events do not dispatch partner escalation webhooks.
+The deterministic scenario report remains separate from optional Gemini output and
+must not be presented as observed market evidence.
 
 ## Scenario evidence
 

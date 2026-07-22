@@ -4,9 +4,11 @@ import json
 import math
 import unittest
 
+import dyops_core
 from loguru import logger
 
 from scenarios.catalog import get_catalog, get_scenario, list_scenarios
+from sentinel import DyopsSentinel, SentinelLevel
 
 logger.disable("sentinel")
 
@@ -79,6 +81,34 @@ class ScenarioRunnerTests(unittest.TestCase):
         self.assertIsNotNone(result.metrics.first_escalation_tick)
         self.assertIsNotNone(result.metrics.return_to_monitoring_tick)
         self.assertEqual(result.metrics.final_criticality_recent_pct, 0.0)
+
+    def test_prolonged_invalid_data_preserves_elevated_criticality(self) -> None:
+        sentinel = DyopsSentinel(
+            dyops_core.BasisObserver(
+                name="invalid-data-scenario",
+                theta=1.0,
+                measurement_noise=1e-8,
+                ring_buffer_capacity=1000,
+            ),
+        )
+        for tick in range(20):
+            sentinel.process_event(float(tick), 100.0, 100.0)
+        elevated = None
+        for tick in range(20, 40):
+            elevated = sentinel.process_event(float(tick), 130.0, 100.0)
+        self.assertIsNotNone(elevated)
+        self.assertEqual(elevated.level, SentinelLevel.AUDIT)
+        criticality = elevated.criticality_recent_pct
+
+        invalid_results = [
+            sentinel.process_event(float(tick), 100.0, 0.0)
+            for tick in range(40, 240)
+        ]
+        self.assertTrue(all(not result.health.measurement_valid for result in invalid_results))
+        self.assertTrue(all(result.level == SentinelLevel.AUDIT for result in invalid_results))
+        self.assertTrue(
+            all(result.criticality_recent_pct == criticality for result in invalid_results)
+        )
 
 
 if __name__ == "__main__":

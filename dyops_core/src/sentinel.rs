@@ -266,4 +266,37 @@ mod tests {
             .collect();
         assert_eq!(snapshots, vec![0, 3, 6]);
     }
+
+    #[test]
+    fn sustained_audit_is_not_diluted_by_invalid_ticks() {
+        let observer = BasisObserver::new(ObserverInit {
+            name: "invalid-audit-test".into(),
+            theta: 1.0,
+            q_process: None,
+            r_measurement: Some(1e-8),
+            ring_buffer_capacity: Some(1000),
+        })
+        .unwrap();
+        let mut policy = SentinelPolicy::new(
+            observer,
+            CRITICALITY_WINDOW,
+            CRITICALITY_AUDIT_PCT,
+            AUDIT_COOLDOWN_TICKS,
+        )
+        .unwrap();
+        for tick in 0..20 {
+            policy.process_event(tick as f64, 100.0, 100.0);
+        }
+        let mut elevated = None;
+        for tick in 20..40 {
+            elevated = Some(policy.process_event(tick as f64, 130.0, 100.0));
+        }
+        assert_eq!(elevated.unwrap().level, EventLevel::Audit);
+
+        for tick in 40..240 {
+            let event = policy.process_event(tick as f64, 100.0, 0.0);
+            assert!(!event.health.measurement_valid);
+            assert_eq!(event.level, EventLevel::Audit);
+        }
+    }
 }

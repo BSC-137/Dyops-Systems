@@ -5,7 +5,8 @@ services:
       dockerfile: Dockerfile.api
     environment:
       DYOPS_BINANCE_FEED: ${DYOPS_BINANCE_FEED:-stable}
-      DYOPS_DEMO_INJECT: ${DYOPS_DEMO_INJECT:-1}
+      DYOPS_DEMO_INJECT: ${DYOPS_DEMO_INJECT:-0}
+      DYOPS_DEMO_SECRET: ${DYOPS_DEMO_SECRET:-}
       DYOPS_WEBHOOK_URLS: ${DYOPS_WEBHOOK_URLS:-}
       DYOPS_CORS_ORIGINS: ${DYOPS_CORS_ORIGINS:-http://localhost:8080}
       DYOPS_SQLITE_PATH: /data/dyops_ts.db

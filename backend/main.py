@@ -9,6 +9,7 @@ import json
 import math
 import os
 import queue
+import secrets
 import sys
 import threading
 import time
@@ -17,7 +18,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -29,8 +30,9 @@ if str(_DYOPS_PY) not in sys.path:
     sys.path.insert(0, str(_DYOPS_PY))
 
 import dyops_core  # noqa: E402
+from loguru import logger  # noqa: E402
 from binance_feed import start_instrument_feed_threads  # noqa: E402
-from database import PersistenceManager  # noqa: E402
+from database import PersistenceManager, REPLAY_WINDOW_EVENTS  # noqa: E402
 from instruments import InstrumentConfig, load_instruments  # noqa: E402
 from scenarios import get_scenario  # noqa: E402
 from sentinel import (  # noqa: E402
@@ -48,6 +50,8 @@ _HISTORY_SUMMARY_MAX = 200
 _HISTORY_EXPLAIN_MAX = 280
 _PULSE_SUMMARY_MAX = 200
 _PULSE_EXPLAIN_MAX = 280
+STALE_CUTOFF_SEC = 12.0
+_INGEST_LOG_INTERVAL_SEC = 5.0
 
 
 def _clip_text(s: str, max_len: int) -> str:
@@ -182,7 +186,8 @@ def _pulse_narrative(
         )
     else:
         summary = (
-            f"STALE · last tick age {age_s} (cutoff 12s) · session {session} · "
+            f"STALE · last tick age {age_s} (cutoff {STALE_CUTOFF_SEC:g}s) · "
+            f"session {session} · "
             f"{total} events on record."
         )
         explain = (
@@ -287,6 +292,10 @@ _persistence: PersistenceManager | None = None
 _sentinel: DyopsSentinel | None = None
 _session_event_count: int = 0
 _last_tick_monotonic: float = 0.0
+_dropped_tick_count: int = 0
+_processing_error_count: int = 0
+_last_ingest_log_at: dict[str, float] = {}
+_demo_injection_active = False
 _webhook_tasks: set[asyncio.Task[None]] = set()
 _instrument_configs: tuple[InstrumentConfig, ...] = ()
 _primary_instrument_id = "default"
@@ -300,9 +309,24 @@ class InstrumentRuntime:
     last_tick_monotonic: float = 0.0
     level: str = "MONITORING"
     last_mahalanobis: float | None = None
+    criticality_recent_pct: float = 0.0
 
 
 _instrument_runtimes: dict[str, InstrumentRuntime] = {}
+
+
+def _log_ingestion_issue(kind: str, **context: Any) -> None:
+    """Rate-limit noisy feed failures while preserving structured context and counters."""
+    now = time.monotonic()
+    last = _last_ingest_log_at.get(kind, 0.0)
+    if now - last < _INGEST_LOG_INTERVAL_SEC:
+        return
+    _last_ingest_log_at[kind] = now
+    logger.bind(issue=kind, **context).warning(
+        "Telemetry ingestion issue: {issue} | {context}",
+        issue=kind,
+        context=context,
+    )
 
 
 def _replay_observer_state(
@@ -314,7 +338,10 @@ def _replay_observer_state(
         theta=1.0,
         ring_buffer_capacity=1000,
     )
-    rows = persistence.load_recent_events(500, instrument_id=instrument_id)
+    rows = persistence.load_recent_events(
+        REPLAY_WINDOW_EVENTS,
+        instrument_id=instrument_id,
+    )
     for row in rows:
         observer.update(
             float(row["timestamp"]),
@@ -327,6 +354,7 @@ def _replay_observer_state(
 def _on_startup_sync() -> dict[str, InstrumentRuntime]:
     global _persistence, _sentinel, _session_event_count, _binance_threads
     global _instrument_configs, _instrument_runtimes, _primary_instrument_id
+    global _dropped_tick_count, _processing_error_count, _demo_injection_active
     db_path = os.environ.get("DYOPS_SQLITE_PATH")
     _persistence = PersistenceManager(db_path)
     _instrument_configs = load_instruments()
@@ -343,6 +371,10 @@ def _on_startup_sync() -> dict[str, InstrumentRuntime]:
         )
         _instrument_runtimes[config.id] = InstrumentRuntime(config, sentinel)
     _session_event_count = 0
+    _dropped_tick_count = 0
+    _processing_error_count = 0
+    _last_ingest_log_at.clear()
+    _demo_injection_active = False
     _sentinel = _instrument_runtimes[_primary_instrument_id].sentinel
     _stop_binance.clear()
     _binance_threads = start_instrument_feed_threads(
@@ -406,6 +438,7 @@ async def _send_escalation_webhook(
         "innovation": health["innovation"],
         "criticality_recent_pct": model["criticality_recent_pct"],
         "instrument_id": model["instrument_id"],
+        "ingestion_source": model["ingestion_source"],
         "summary": summary,
         "explainability": explainability,
     }
@@ -433,13 +466,26 @@ def _schedule_escalation_webhook(
 
 async def _telemetry_pump() -> None:
     global _last_tick_monotonic, _session_event_count
+    global _dropped_tick_count, _processing_error_count, _demo_injection_active
     assert _instrument_runtimes
     while True:
         is_demo = False
         delay_after = 0.0
+        demo_scenario: str | None = None
+        demo_last = False
         try:
             demo_item = _demo_telemetry_queue.get_nowait()
-            if len(demo_item) == 5:
+            if len(demo_item) == 7:
+                (
+                    instrument_id,
+                    ts,
+                    phys,
+                    tok,
+                    delay_after,
+                    demo_scenario,
+                    demo_last,
+                ) = demo_item
+            elif len(demo_item) == 5:
                 instrument_id, ts, phys, tok, delay_after = demo_item
             else:
                 ts, phys, tok, delay_after = demo_item
@@ -458,6 +504,14 @@ async def _telemetry_pump() -> None:
                 continue
         runtime = _instrument_runtimes.get(str(instrument_id))
         if runtime is None:
+            _dropped_tick_count += 1
+            _log_ingestion_issue(
+                "unknown_instrument",
+                instrument_id=str(instrument_id),
+                dropped_tick_count=_dropped_tick_count,
+            )
+            if is_demo and demo_last:
+                _demo_injection_active = False
             continue
         try:
             result = runtime.sentinel.process_event(
@@ -466,12 +520,23 @@ async def _telemetry_pump() -> None:
                 tok,
                 schedule_background_audit=not is_demo,
             )
-        except Exception:  # noqa: BLE001
+        except Exception as exc:  # noqa: BLE001
+            _processing_error_count += 1
+            _log_ingestion_issue(
+                "process_event_error",
+                instrument_id=runtime.config.id,
+                timestamp=ts,
+                error=repr(exc),
+                processing_error_count=_processing_error_count,
+            )
+            if is_demo and demo_last:
+                _demo_injection_active = False
             await asyncio.sleep(0.001)
             continue
         runtime.last_tick_monotonic = time.monotonic()
         runtime.session_event_count += 1
         runtime.level = result.level.name
+        runtime.criticality_recent_pct = result.criticality_recent_pct
         mahalanobis = float(result.health.mahalanobis_distance)
         runtime.last_mahalanobis = mahalanobis if math.isfinite(mahalanobis) else None
         if runtime.config.id == _primary_instrument_id:
@@ -483,7 +548,12 @@ async def _telemetry_pump() -> None:
         model["physical_price"] = phys
         model["token_price"] = tok
         model["session_event_index"] = runtime.session_event_count
-        if result.level.name == "BREACH" or result.snapshot is not None:
+        model["ingestion_source"] = "demo" if is_demo else "live"
+        if demo_scenario is not None:
+            model["demo_scenario"] = demo_scenario
+        if not is_demo and (
+            result.level.name == "BREACH" or result.snapshot is not None
+        ):
             _schedule_escalation_webhook(
                 model,
                 session_event_count=runtime.session_event_count,
@@ -491,6 +561,8 @@ async def _telemetry_pump() -> None:
         await hub.broadcast_telemetry(model)
         if delay_after > 0.0:
             await asyncio.sleep(delay_after)
+        if is_demo and demo_last:
+            _demo_injection_active = False
 
 
 async def _audit_poll_loop() -> None:
@@ -559,6 +631,16 @@ class StatusResponse(BaseModel):
     criticality_audit_pct: float
     audit_cooldown_ticks: int
     demo_inject_enabled: bool
+    demo_injection_active: bool
+    telemetry_queue_depth: int
+    demo_queue_depth: int
+    persistence_queue_depth: int
+    persistence_healthy: bool
+    persistence_last_error: str | None
+    dropped_tick_count: int
+    processing_error_count: int
+    stale_cutoff_sec: float
+    replay_window_events: int
 
 
 class InstrumentResponse(BaseModel):
@@ -571,6 +653,7 @@ class InstrumentResponse(BaseModel):
     live: bool
     level: str
     last_mahalanobis: float | None
+    criticality_recent_pct: float
     events_session: int
     events_total_sqlite: int
     last_tick_age_sec: float | None
@@ -598,9 +681,10 @@ async def api_instruments() -> list[InstrumentResponse]:
         out.append(
             InstrumentResponse(
                 **config.to_dict(),
-                live=age is not None and age <= 12.0,
+                live=age is not None and age <= STALE_CUTOFF_SEC,
                 level=runtime.level,
                 last_mahalanobis=runtime.last_mahalanobis,
+                criticality_recent_pct=runtime.criticality_recent_pct,
                 events_session=runtime.session_event_count,
                 events_total_sqlite=(
                     _persistence.count_events(config.id) if _persistence else 0
@@ -625,12 +709,25 @@ async def api_status() -> StatusResponse:
         ),
         audits_dir=str(AUDITS_DIR.resolve()),
         db_path=str(_persistence.db_path.resolve()),
-        global_events_total_sqlite=_persistence.count_events(),
+        global_events_total_sqlite=await asyncio.to_thread(_persistence.count_events),
         mahalanobis_breach_threshold=float(MAHALANOBIS_BREACH),
         criticality_window_events=int(CRITICALITY_WINDOW_EVENTS),
         criticality_audit_pct=float(CRITICALITY_AUDIT_PCT),
         audit_cooldown_ticks=int(AUDIT_COOLDOWN_TICKS),
-        demo_inject_enabled=os.environ.get("DYOPS_DEMO_INJECT") == "1",
+        demo_inject_enabled=(
+            os.environ.get("DYOPS_DEMO_INJECT") == "1"
+            and bool(os.environ.get("DYOPS_DEMO_SECRET"))
+        ),
+        demo_injection_active=_demo_injection_active,
+        telemetry_queue_depth=_telemetry_queue.qsize(),
+        demo_queue_depth=_demo_telemetry_queue.qsize(),
+        persistence_queue_depth=_persistence.queue_depth,
+        persistence_healthy=_persistence.healthy,
+        persistence_last_error=_persistence.last_error,
+        dropped_tick_count=_dropped_tick_count,
+        processing_error_count=_processing_error_count,
+        stale_cutoff_sec=STALE_CUTOFF_SEC,
+        replay_window_events=REPLAY_WINDOW_EVENTS,
     )
 
 
@@ -639,26 +736,44 @@ async def inject_demo_scenario(
     name: str = "sudden_depeg",
     seed: int = 13,
     instrument: str | None = None,
+    x_dyops_demo_secret: str | None = Header(default=None),
 ) -> dict[str, int | str]:
+    global _demo_injection_active
     if os.environ.get("DYOPS_DEMO_INJECT") != "1":
         raise HTTPException(status_code=404, detail="Not found")
+    expected_secret = os.environ.get("DYOPS_DEMO_SECRET", "")
+    if not expected_secret:
+        raise HTTPException(status_code=503, detail="Demo secret is not configured")
+    if x_dyops_demo_secret is None or not secrets.compare_digest(
+        x_dyops_demo_secret,
+        expected_secret,
+    ):
+        raise HTTPException(status_code=401, detail="Invalid demo secret")
     if name != "sudden_depeg":
         raise HTTPException(status_code=400, detail="Only sudden_depeg is available")
-    if not _demo_telemetry_queue.empty():
+    if _demo_injection_active:
         raise HTTPException(status_code=409, detail="A demo injection is already running")
     runtime = _instrument_runtime(instrument)
 
     scenario = get_scenario(name, seed=seed)
     shock_tick = int(scenario.expected_outcomes.get("shock_tick", 0))
     timestamp = time.time()
-    for i, (phys, tok) in enumerate(
-        zip(scenario.physical_price, scenario.token_price, strict=True)
-    ):
+    pairs = list(zip(scenario.physical_price, scenario.token_price, strict=True))
+    _demo_injection_active = True
+    for i, (phys, tok) in enumerate(pairs):
         # Keep injected timestamps effectively current while pacing the visible stress phase.
         ts = timestamp + i * 1e-6
         delay_after = 0.04 if i >= shock_tick else 0.0
-        _demo_telemetry_queue.put(
-            (runtime.config.id, ts, float(phys), float(tok), delay_after)
+        _demo_telemetry_queue.put_nowait(
+            (
+                runtime.config.id,
+                ts,
+                float(phys),
+                float(tok),
+                delay_after,
+                name,
+                i == len(pairs) - 1,
+            )
         )
     return {
         "scenario": name,
@@ -706,13 +821,13 @@ class PulseResponse(BaseModel):
 
 @app.get("/api/history", response_model=list[HistoryPoint])
 async def api_history(
-    limit: int = 500,
+    limit: int = REPLAY_WINDOW_EVENTS,
     instrument: str | None = None,
 ) -> list[HistoryPoint]:
     assert _persistence is not None
     runtime = _instrument_runtime(instrument)
     rows = _persistence.load_recent_events(
-        min(limit, 2000),
+        min(max(limit, 0), REPLAY_WINDOW_EVENTS),
         instrument_id=runtime.config.id,
     )
     plain, _ = _replay_history_events(rows)
@@ -721,14 +836,14 @@ async def api_history(
 
 @app.get("/api/history/trace", response_model=HistoryTraceBundle)
 async def api_history_trace(
-    limit: int = 500,
+    limit: int = REPLAY_WINDOW_EVENTS,
     instrument: str | None = None,
 ) -> HistoryTraceBundle:
     """Replay with per-tick reasoning; chart clients may keep using GET /api/history only."""
     assert _persistence is not None
     runtime = _instrument_runtime(instrument)
     rows = _persistence.load_recent_events(
-        min(limit, 2000),
+        min(max(limit, 0), REPLAY_WINDOW_EVENTS),
         instrument_id=runtime.config.id,
     )
     _, trace = _replay_history_events(rows)
@@ -746,7 +861,9 @@ async def api_pulse(instrument: str | None = None) -> PulseResponse:
     runtime = _instrument_runtime(instrument)
     stale = runtime.last_tick_monotonic <= 0
     if runtime.last_tick_monotonic > 0:
-        stale = (time.monotonic() - runtime.last_tick_monotonic) > 12.0
+        stale = (
+            time.monotonic() - runtime.last_tick_monotonic
+        ) > STALE_CUTOFF_SEC
     total_sqlite = (
         _persistence.count_events(runtime.config.id) if _persistence is not None else 0
     )

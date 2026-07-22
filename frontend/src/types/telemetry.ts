@@ -8,6 +8,8 @@ export interface TelemetryPayload {
   physical_price: number
   token_price: number
   session_event_index?: number
+  ingestion_source: "live" | "demo"
+  demo_scenario?: string
   health: {
     filtered_basis: number
     innovation: number
@@ -51,6 +53,16 @@ export interface StatusResponse {
   criticality_audit_pct: number
   audit_cooldown_ticks: number
   demo_inject_enabled: boolean
+  demo_injection_active: boolean
+  telemetry_queue_depth: number
+  demo_queue_depth: number
+  persistence_queue_depth: number
+  persistence_healthy: boolean
+  persistence_last_error: string | null
+  dropped_tick_count: number
+  processing_error_count: number
+  stale_cutoff_sec: number
+  replay_window_events: number
 }
 
 /** GET /api/history/trace */
@@ -116,6 +128,7 @@ export interface InstrumentInfo {
   live: boolean
   level: SentinelLevel
   last_mahalanobis: number | null
+  criticality_recent_pct: number
   events_session: number
   events_total_sqlite: number
   last_tick_age_sec: number | null

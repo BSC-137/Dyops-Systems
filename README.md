@@ -14,7 +14,8 @@ Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/REA
 The measurement, escalation, and validation boundaries are documented in
 [`docs/METHODOLOGY.md`](docs/METHODOLOGY.md).
 
-**CI runs the Rust tests and threshold-gated scenario suite on every pull request to `main`.**
+**CI runs Rust tests, deterministic scenarios, Python/backend tests, frontend
+lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 
 ---
 
@@ -102,9 +103,12 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
 
 ### Act III — The Audit trail (escalation & narrative)
 
-- **UI:** **Structural Drift Audit** — scroll list + **Recent audit index** table; data from **`WebSocket /ws/audits`** (initial snapshot + live tail). **Gemini** badge **CONFIGURED** vs **OFFLINE** comes from **`GET /api/status`** (`gemini_configured`).
-- **When Gemini is OFFLINE:** expect *“No Gemini audits yet.”* — escalation path and **`/api/history/trace`** reasoning still demonstrate **deterministic** monitoring; optional LLM is additive.
-- **When configured:** audit cards show risk and narrative fields from stored reports (JSON + SQLite).
+- **UI:** Open the **Incidents** tab to inspect reconstructed BREACH/AUDIT windows,
+  per-tick reasoning, matching Gemini narratives (when configured), and **Export JSON**.
+- **UI:** Open **Instruments** for feed/session state; return to **Live** for the chart
+  and compact Structural Drift Audit summary.
+- **When Gemini is OFFLINE:** incident windows and `/api/history/trace` remain fully
+  deterministic; optional LLM narrative is additive.
 
 ---
 
@@ -218,7 +222,8 @@ Generated / local artifacts (typically gitignored or not committed):
 - **State** tracks basis, velocity, and mean level in a **critically damped OU**-style discrete model with mean-reversion speed **`theta`**.
 - **`update(timestamp, physical_price, token_price)`** returns **`SystemHealth`**: `filtered_basis`, `innovation`, `mahalanobis_distance`, `measurement_valid`.
 - **Joseph-form** covariance update helps keep covariances positive-semidefinite.
-- **Ring buffer** stores recent innovations for **window statistics** (mean, variance, kurtosis) and **criticality** (percentage of samples with Mahalanobis above a threshold).
+- **Ring buffer** stores valid-observation innovations for **window statistics** and
+  **criticality**. Invalid ticks are omitted so they cannot dilute rolling criticality.
 - **`update_batch`** is available for high-throughput batch ingestion (see `bench_batch.py`).
 - The **`update`** path is implemented in **Rust without GC**, which keeps **per-tick latency predictable** under continuous ingestion (see the comment above `BasisObserver::update` in [`dyops_core/src/observer.rs`](dyops_core/src/observer.rs)).
 
@@ -260,7 +265,9 @@ The app is documented in OpenAPI with an explicit product line:
 
 **Lifecycle**
 
-- On startup: open SQLite, **replay** the last 500 events into a fresh observer (state continuity), construct **`DyopsSentinel`** (with optional **`AgenticAuditor`** if API keys present), start the Binance thread.
+- On startup: open SQLite, **replay** the last 1,000 events per instrument into a
+  fresh observer (the same bounded maximum used by forensic APIs), construct
+  **`DyopsSentinel`**, and start the Binance thread.
 
 **WebSockets**
 
@@ -307,7 +314,8 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 
 **Layout**
 
-- ~**70%** chart, ~**30%** audit column + compact **Recent audit index** table.
+- Three tabs: **Live** (full-width telemetry chart), **Incidents** (forensic windows
+  and exports), and **Instruments** (feed/runtime overview).
 
 ---
 
@@ -324,6 +332,8 @@ Replay walks SQLite rows through a **fresh** in-process `BasisObserver` (same pa
 | `DYOPS_INSTRUMENT_LABEL` | Optional label for the backward-compatible single feed |
 | `DYOPS_CORS_ORIGINS` | Comma-separated origins for FastAPI CORS (default includes Vite dev server) |
 | `DYOPS_WEBHOOK_URLS` | Optional comma-separated partner webhook URLs |
+| `DYOPS_DEMO_INJECT` | Set to `1` only for an explicit demo; disabled by default |
+| `DYOPS_DEMO_SECRET` | Shared secret required in `X-Dyops-Demo-Secret` for demo injection |
 
 ---
 
@@ -345,6 +355,16 @@ Open:
 The nginx container proxies same-origin `/api/*` and WebSocket `/ws/*` traffic to the API container. SQLite data persists in the `dyops-data` Docker volume. Stop the stack with `docker compose down`; add `-v` only when you intentionally want to delete persisted demo data.
 
 Requirements: Docker Engine with the Compose plugin. Edit `.env` before startup to change the feed, demo injection, partner webhooks, or allowed origins.
+
+`scripts/demo.sh` explicitly enables demo injection for that process and defaults the
+local secret to `dyops-local-demo` (printed at startup). Normal `docker compose up`
+keeps injection disabled. To inject without the UI:
+
+```bash
+curl -X POST \
+  -H 'X-Dyops-Demo-Secret: dyops-local-demo' \
+  'http://localhost:8000/api/demo/inject_scenario?name=sudden_depeg&seed=13'
+```
 
 ---
 
@@ -436,10 +456,11 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 | Method / path | Role |
 |---------------|------|
 | `GET /api/instruments` | Instrument ids, labels, live/stale state, current level, last Mahalanobis, feed metadata, and scoped event counts |
-| `GET /api/status` | `gemini_configured`, `webhook_configured`, `binance_feed`, `audits_dir`, `db_path`, `global_events_total_sqlite`, **`mahalanobis_breach_threshold`** |
+| `GET /api/status` | Configuration plus queue depths, persistence health, dropped/failed ingestion counters, stale cutoff, and the 1,000-event replay bound |
 | `GET /api/pulse?instrument=` | Instrument-scoped freshness, counts, `summary`, and `explainability` |
 | `GET /api/history?instrument=&limit=` | Instrument-scoped bare **`HistoryPoint[]`**, including `instrument_id` |
 | `GET /api/history/trace?instrument=&limit=` | Instrument-scoped trace bundle with deterministic per-tick `reasoning` |
+| `POST /api/demo/inject_scenario` | Explicit-demo-only synthetic injection; requires `X-Dyops-Demo-Secret` |
 | `WebSocket /ws/telemetry` | Shared live stream; every payload includes `instrument_id` for client filtering |
 | `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
 
@@ -469,8 +490,12 @@ This integration uses plain HTTP webhooks through `httpx`; it does not require a
 
 - **EventResult / telemetry**: includes nested **`health`**, optional large **`snapshot`** on AUDIT-level ticks (can increase WebSocket payload size).
 - **SQLite `event_id`** on audits is **best-effort** (tied to writer state at insert time); for strict lineage, prefer timestamps and full `report_json`.
-- **Replay**: both the FastAPI app and the dashboard **replay** stored events through a new observer on startup so the filter state matches continuity of stored prices (up to the replay window).
-- **Chart vs trace**: the UI calls **`/api/history`** for the chart and **`/api/history/trace`** once on load for audit-column copy—two replays of the same window, acceptable for current scale; collapse to one request later if you add a `meta` query flag.
+- **Replay**: startup and forensic APIs share a bounded maximum of **1,000 most
+  recent events per instrument**, oldest-first. Smaller API limits select a suffix.
+- **Demo labels**: telemetry payloads add `ingestion_source` (`live` or `demo`) and
+  demo payloads add `demo_scenario`. Demo escalations do not call partner webhooks.
+- **Chart vs trace**: the UI refreshes forensic trace after demo injection and
+  escalation events so incident copy does not lag the live chart.
 
 ---
 

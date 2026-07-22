@@ -23,7 +23,7 @@ from loguru import logger
 
 import dyops_core
 from binance_feed import resolve_feed_mode, start_binance_feed_thread
-from database import PersistenceManager
+from database import PersistenceManager, REPLAY_WINDOW_EVENTS
 from sentinel import AUDITS_DIR, DyopsSentinel, MAHALANOBIS_BREACH
 
 # ---------------------------------------------------------------------------
@@ -306,7 +306,7 @@ def _init_session_state() -> None:
     db_path = os.environ.get("DYOPS_SQLITE_PATH")
     st.session_state.persistence = PersistenceManager(db_path)
 
-    rows = st.session_state.persistence.load_recent_events(500)
+    rows = st.session_state.persistence.load_recent_events(REPLAY_WINDOW_EVENTS)
     observer = dyops_core.BasisObserver(
         name="basis-guard-ui",
         theta=1.0,

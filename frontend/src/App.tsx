@@ -148,6 +148,7 @@ export default function App() {
   const [auditCooldownTicks, setAuditCooldownTicks] = useState(0)
   const [demoInjectEnabled, setDemoInjectEnabled] = useState(false)
   const [demoInjectRunning, setDemoInjectRunning] = useState(false)
+  const [ingestionSource, setIngestionSource] = useState<"live" | "demo">("live")
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceBundle, setTraceBundle] = useState<HistoryTraceBundle | null>(null)
   const [pulseSummaryLine, setPulseSummaryLine] = useState("")
@@ -157,6 +158,8 @@ export default function App() {
   const snapshotHighlightTimerRef =
     useRef<ReturnType<typeof setTimeout> | null>(null)
   const demoResetTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const forensicRefreshTimerRef =
+    useRef<ReturnType<typeof setTimeout> | null>(null)
 
   const mergeChart = useCallback((point: ChartPoint) => {
     chartDataRef.current = [...chartDataRef.current, point].slice(-MAX_POINTS)
@@ -189,33 +192,29 @@ export default function App() {
     }
   }, [])
 
-  useEffect(() => {
-    let cancelled = false
-    ;(async () => {
-      try {
-        const params = new URLSearchParams({ limit: "500" })
-        if (selectedInstrumentId) params.set("instrument", selectedInstrumentId)
-        const r = await fetch(`/api/history?${params}`)
-        if (!r.ok) throw new Error(String(r.status))
-        const rows: HistoryApiRow[] = await r.json()
-        if (cancelled) return
-        const initial: ChartPoint[] = rows.map((x) => ({
-          t: x.t,
-          measured_basis: x.measured_basis,
-          filtered_basis: x.filtered_basis,
-          innovation: x.innovation,
-          mahalanobis: x.mahalanobis,
-        }))
-        chartDataRef.current = initial.slice(-MAX_POINTS)
-        setChartData(chartDataRef.current)
-      } catch {
-        if (!cancelled) chartDataRef.current = []
-      }
-    })()
-    return () => {
-      cancelled = true
-    }
+  const loadHistory = useCallback(async () => {
+    const params = new URLSearchParams({ limit: "500" })
+    if (selectedInstrumentId) params.set("instrument", selectedInstrumentId)
+    const r = await fetch(`/api/history?${params}`)
+    if (!r.ok) throw new Error(String(r.status))
+    const rows: HistoryApiRow[] = await r.json()
+    const initial: ChartPoint[] = rows.map((x) => ({
+      t: x.t,
+      measured_basis: x.measured_basis,
+      filtered_basis: x.filtered_basis,
+      innovation: x.innovation,
+      mahalanobis: x.mahalanobis,
+    }))
+    chartDataRef.current = initial.slice(-MAX_POINTS)
+    setChartData(chartDataRef.current)
   }, [selectedInstrumentId])
+
+  useEffect(() => {
+    void loadHistory().catch(() => {
+      chartDataRef.current = []
+      setChartData([])
+    })
+  }, [loadHistory])
 
   const loadHistoryTrace = useCallback(async () => {
     try {
@@ -291,6 +290,16 @@ export default function App() {
           })
           setSentinelLevel(p.level)
           setCriticalityRecentPct(p.criticality_recent_pct)
+          setIngestionSource(p.ingestion_source)
+          if (p.level !== "MONITORING" || p.snapshot !== null) {
+            if (forensicRefreshTimerRef.current !== null) {
+              clearTimeout(forensicRefreshTimerRef.current)
+            }
+            forensicRefreshTimerRef.current = setTimeout(() => {
+              void loadHistoryTrace()
+              forensicRefreshTimerRef.current = null
+            }, 300)
+          }
           if (p.snapshot !== null) {
             setSnapshotHighlighted(true)
             if (snapshotHighlightTimerRef.current !== null) {
@@ -325,8 +334,12 @@ export default function App() {
         clearTimeout(snapshotHighlightTimerRef.current)
         snapshotHighlightTimerRef.current = null
       }
+      if (forensicRefreshTimerRef.current !== null) {
+        clearTimeout(forensicRefreshTimerRef.current)
+        forensicRefreshTimerRef.current = null
+      }
     }
-  }, [mergeChart, selectedInstrumentId])
+  }, [loadHistoryTrace, mergeChart, selectedInstrumentId])
 
   const upsertAudit = useCallback((row: AuditRow) => {
     const m = auditsRef.current
@@ -380,11 +393,7 @@ export default function App() {
         if (statusR.ok) {
           const s = (await statusR.json()) as StatusResponse
           setGeminiOk(s.gemini_configured)
-          setFeedMode(
-            instruments.find(
-              (instrument) => instrument.id === selectedInstrumentId,
-            )?.feed_mode ?? s.binance_feed,
-          )
+          setFeedMode(s.binance_feed)
           setMahalanobisBreachThreshold(s.mahalanobis_breach_threshold)
           setCriticalityWindowEvents(s.criticality_window_events)
           setCriticalityAuditPct(s.criticality_audit_pct)
@@ -392,7 +401,16 @@ export default function App() {
           setDemoInjectEnabled(s.demo_inject_enabled)
         }
         if (instrumentsR.ok) {
-          setInstruments((await instrumentsR.json()) as InstrumentInfo[])
+          const next = (await instrumentsR.json()) as InstrumentInfo[]
+          setInstruments(next)
+          const selected = next.find(
+            (instrument) => instrument.id === selectedInstrumentId,
+          )
+          if (selected) {
+            setFeedMode(selected.feed_mode)
+            setSentinelLevel(selected.level)
+            setCriticalityRecentPct(selected.criticality_recent_pct)
+          }
         }
       } catch {
         /* ignore */
@@ -401,28 +419,44 @@ export default function App() {
     tick()
     const t = setInterval(tick, 2000)
     return () => clearInterval(t)
-  }, [instruments, selectedInstrumentId])
+  }, [selectedInstrumentId])
 
   const injectSuddenDepeg = useCallback(async () => {
     setDemoInjectRunning(true)
     try {
+      let demoSecret = window.sessionStorage.getItem("dyops-demo-secret")
+      if (!demoSecret) {
+        demoSecret = window.prompt(
+          "Enter the demo injection secret",
+          "dyops-local-demo",
+        )
+        if (!demoSecret) {
+          setDemoInjectRunning(false)
+          return
+        }
+        window.sessionStorage.setItem("dyops-demo-secret", demoSecret)
+      }
       const response = await fetch(
         `/api/demo/inject_scenario?name=sudden_depeg${
           selectedInstrumentId
             ? `&instrument=${encodeURIComponent(selectedInstrumentId)}`
             : ""
         }`,
-        { method: "POST" },
+        {
+          method: "POST",
+          headers: { "X-Dyops-Demo-Secret": demoSecret },
+        },
       )
       if (!response.ok) throw new Error(String(response.status))
       demoResetTimerRef.current = setTimeout(() => {
         setDemoInjectRunning(false)
+        void Promise.all([loadHistory(), loadHistoryTrace()])
         demoResetTimerRef.current = null
       }, 7000)
     } catch {
       setDemoInjectRunning(false)
     }
-  }, [selectedInstrumentId])
+  }, [loadHistory, loadHistoryTrace, selectedInstrumentId])
 
   useEffect(
     () => () => {
@@ -528,6 +562,11 @@ export default function App() {
                 ? "Demo: sudden depeg running…"
                 : "Demo: inject sudden depeg"}
             </button>
+          ) : null}
+          {ingestionSource === "demo" ? (
+            <Badge variant="warning" className="font-mono-nums text-[10px]">
+              Synthetic demo telemetry
+            </Badge>
           ) : null}
         </div>
 

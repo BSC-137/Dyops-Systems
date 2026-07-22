@@ -84,3 +84,65 @@ jobs:
           GEMINI_API_KEY: ""
           GOOGLE_API_KEY: ""
         run: pytest backend/tests -q
+
+  frontend:
+    name: Frontend lint and build
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: frontend
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install frontend dependencies
+        run: npm ci
+
+      - name: Lint frontend
+        run: npm run lint
+
+      - name: Build frontend
+        run: npm run build
+
+  docker-smoke:
+    name: Docker Compose smoke
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build and start stack
+        env:
+          DYOPS_DEMO_INJECT: "0"
+        run: docker compose up --build -d
+
+      - name: Wait for API and verify safe status
+        run: |
+          for attempt in $(seq 1 60); do
+            if curl -fsS http://localhost:8000/api/status > /tmp/status.json; then
+              break
+            fi
+            sleep 2
+          done
+          python - <<'PY'
+          import json
+          with open("/tmp/status.json", encoding="utf-8") as handle:
+              status = json.load(handle)
+          assert status["persistence_healthy"] is True
+          assert status["demo_inject_enabled"] is False
+          assert status["replay_window_events"] == 1000
+          PY
+          curl -fsS http://localhost:8080/ >/dev/null
+
+      - name: Show logs on failure
+        if: failure()
+        run: docker compose logs
+
+      - name: Stop stack
+        if: always()
+        run: docker compose down -v
