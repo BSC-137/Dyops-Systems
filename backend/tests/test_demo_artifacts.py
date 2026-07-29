@@ -9,7 +9,7 @@ def test_example_incident_export_is_explicitly_unsigned_and_hashes() -> None:
     path = Path(__file__).resolve().parents[2] / "examples" / "incident-export.json"
     artifact = json.loads(path.read_text(encoding="utf-8"))
 
-    assert artifact["schema_version"] == "2.0"
+    assert artifact["schema_version"] == "2.1"
     assert artifact["software"]["name"] == "dyops"
     assert artifact["classification"]["unsigned"] is True
     assert "not a regulatory attestation" in artifact["classification"]["non_claim"]
@@ -18,6 +18,9 @@ def test_example_incident_export_is_explicitly_unsigned_and_hashes() -> None:
     )
     assert artifact["optional_llm_evidence"]["present"] is False
     assert "not a digital signature" in artifact["integrity_notice"]
+    assert artifact["peg_health"]["band"] == "Breach"
+    assert artifact["peg_health"]["schema_version"] == "1.0"
+    assert "not a default probability" in artifact["peg_health"]["explainability"].lower()
 
     expected = artifact.pop("content_sha256")
     canonical = json.dumps(

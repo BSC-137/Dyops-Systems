@@ -2,13 +2,23 @@
 
 ## Product brief — for founders, BD, and technical partners
 
-Dyops gives product and risk teams a **focused way to watch tokenized-asset basis and peg stability**: streamed prices, a **Rust-backed state-space filter**, explicit **Mahalanobis-style surprise** against that model, persistence for forensics, and **API-native explainability** operators can read without standing up a quant stack.
+Dyops is an **adopt-able intelligence layer for stablecoin / RWA / token issuers**.
+The core product object is **Peg Health**: a versioned, deterministic band
+(`Healthy` / `Watch` / `Breach` / `Audit`) with basis, filtered state, Mahalanobis
+surprise, criticality, freshness, regime tag, summary, explainability, and last
+transition — reconstructable from SQLite and streamable over REST + WebSocket.
 
-Partners typically embed monitoring **behind their own UX** (treasury, neo-bank ops, tokenized-asset products) and use Dyops as the **measurement and early-warning layer**.
+Partners embed Peg Health **behind their own UX** (treasury, neo-bank ops, issuer
+risk desks) without building a quant stack or reading Kalman internals.
 
-> **An embeddable intelligence layer to monitor peg drift and basis risk without building your own quant-infra stack.**
+> **An embeddable Peg Health layer to monitor peg drift and basis risk without building your own quant-infra stack.**
 
-**What “embeddable” means today:** production-style integration is via **`REST` (`/api/*`)** and **`WebSockets` (`/ws/*`)**, with an optional **React + Vite reference UI** (`frontend/`) for demos and internal ops. **Hosted multi-tenant SaaS, fine-grained API keys, and language-specific SDKs are not first-class in this repo yet** — see **[Next 90 days (planned)](#next-90-days-planned)**.
+**What “embeddable” means today:** production-style integration is via
+**`GET /api/peg_health`**, additive **`peg_health` on `/ws/telemetry`**, and
+**band-transition webhooks**, with an optional **React + Vite reference UI**
+(`frontend/`) for demos and internal ops. **Hosted multi-tenant SaaS, fine-grained
+API keys, and language-specific SDKs are not first-class in this repo yet** — see
+**[Next 90 days (planned)](#next-90-days-planned)**.
 
 Deeper Rust/Python package notes live in [`dyops_core/README.md`](dyops_core/README.md).
 The measurement, escalation, and validation boundaries are documented in
@@ -29,18 +39,20 @@ lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 
 ## What Dyops does
 
+- **Exposes Peg Health** as the partner-facing object: `GET /api/peg_health?instrument=`
+  and additive `peg_health` on `/ws/telemetry` (`schema_version: "1.0"`).
 - **Ingests** named paired instruments over concurrent **Binance WebSockets**, with one observer/sentinel state per instrument.
 - **Filters** log-basis with a **`BasisObserver`** implemented in **Rust** (PyO3), exposed to Python — Kalman-style updates with **`filtered_basis`**, **`innovation`**, **`mahalanobis_distance`**, **`measurement_valid`**.
-- **Policies** (`DyopsSentinel`): breach when Mahalanobis exceeds **`MAHALANOBIS_BREACH`** (default `3.0`); **AUDIT** when rolling **criticality** over a finite window crosses a configurable threshold.
-- **Persists** ticks and audits to **SQLite** through a background writer (**`PersistenceManager`**).
+- **Policies** (`DyopsSentinel`): breach when Mahalanobis exceeds **`MAHALANOBIS_BREACH`** (default `3.0`); **Watch** when Mahalanobis exceeds half that threshold; **AUDIT** when rolling **criticality** over a finite window crosses a configurable threshold. Peg Health bands map these signals.
+- **Persists** ticks and audits to **SQLite** through a background writer (**`PersistenceManager`**); Peg Health is **reconstructable** from the same replay window as history/trace.
 - **Streams** live telemetry and audit tails over **`/ws/telemetry`** and **`/ws/audits`**; **replay** aligns observer state from stored events on startup.
-- **Explainability:** **`GET /api/pulse`** exposes short **`summary`** / **`explainability`** strings; **`GET /api/history/trace`** returns window copy plus deterministic per-tick **`reasoning`** (no LLM — **Gemini does not populate this**).
+- **Escalates** outbound webhooks on **Peg Health band transitions** (issuer-style payload includes full `peg_health`).
+- **Explainability:** Peg Health and **`GET /api/pulse`** expose short **`summary`** / **`explainability`** strings; **`GET /api/history/trace`** returns window copy plus deterministic per-tick **`reasoning`** (no LLM — **Gemini does not populate Peg Health or trace reasoning**).
 - **Optional narrative audits:** `AgenticAuditor` (Gemini) when a key is set and the
-  local client initializes. `/api/status` separates key presence from local readiness;
-  neither field claims endpoint reachability. Narratives, when produced, appear in
-  **Incidents** and never determine classification.
+  local client initializes. Narratives, when produced, appear in
+  **Incidents** and never determine Peg Health classification.
 
-**Boundary (read this once):** Dyops is **not** a regulated attestation service, SOC2-certified control, or substitute for legal/compliance sign-off. Deterministic **`reasoning`** on replay is **operational evidence-grade trace** (what the model saw and how it was classified) — **not** “regulatory proof” or legal advice.
+**Boundary (read this once):** Dyops is **not** a regulated attestation service, SOC2-certified control, or substitute for legal/compliance sign-off. Deterministic Peg Health and replay **`reasoning`** are **operational evidence-grade** (what the model saw and how it was classified) — **not** “regulatory proof,” default probability, or legal advice.
 
 ---
 
@@ -122,18 +134,19 @@ uvicorn backend.main:app --reload --host 127.0.0.1 --port 8000
 cd frontend && npm run dev
 ```
 
-Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for OpenAPI (`PulseResponse`, `HistoryTraceBundle`, `HistoryPoint[]`).
+Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for OpenAPI (`PegHealthResponse`, `PulseResponse`, `HistoryTraceBundle`, `HistoryPoint[]`).
 
 ---
 
-### Act I — The Pulse (filtered state)
+### Act I — Peg Health (the product noun)
 
-- **UI:** Header shows telemetry source (**MARKET · LIVE**, **SIMULATED · OFFLINE**,
-  or **SIMULATED · scenario**), current instrument, freshness age, and LIVE/STALE.
-  **Instrument events** reflects the instrument-scoped SQLite count.
-- **UI:** Card **Real-Time Telemetry** — under the title, copy from **`GET /api/pulse`** fields **`summary`** · **`explainability`** (hover for full text).
-- **UI:** Chart — **Filtered state** (emerald), **Measured basis** (slate), **Innovation (residual)** (stone) — live points from **`/ws/telemetry`** after history loads from **`GET /api/history`**.
-- **API:** `GET http://127.0.0.1:8000/api/pulse` — `live`, `last_tick_age_sec`, `events_session`, `events_total_sqlite`, `summary`, `explainability`.
+- **UI:** Header shows **Peg Health** band (Healthy / Watch / Breach / Audit), freshness
+  (LIVE/STALE), sentinel level, and source badge.
+- **UI:** Card **Peg Health · Live** — summary / explainability from
+  **`GET /api/peg_health`** (also streamed on `/ws/telemetry`).
+- **UI:** Chart series remain supporting evidence (filtered basis, innovation, Mahalanobis).
+- **API:** `GET http://127.0.0.1:8000/api/peg_health` — versioned Peg Health object.
+  Issuer eng can poll this alone without reading filter internals.
 
 ---
 
@@ -141,23 +154,22 @@ Open **`http://localhost:5173`**. Optional: **`http://127.0.0.1:8000/docs`** for
 
 - **UI:** Same chart — right axis **Mahalanobis distance**; dashed **breach
   threshold** matches `mahalanobis_breach_threshold` from `GET /api/status`.
-- **UI:** **Structural Drift Audit** — top block: window **`summary`** and **`explainability`** from **`GET /api/history/trace`** (breach counts in natural language).
-- **API:** `GET http://127.0.0.1:8000/api/history/trace?limit=500` — each point includes deterministic **`reasoning`** (Mahalanobis vs threshold, validity). **Not** Gemini-generated.
+- **UI:** **Peg Health · Forensic window** — window **`summary`** and **`explainability`** from **`GET /api/history/trace`**.
+- **API:** `GET http://127.0.0.1:8000/api/history/trace?limit=500` — each point includes deterministic **`reasoning`**. **Not** Gemini-generated.
 
 ---
 
 ### Act III — The Audit trail (escalation & narrative)
 
-- **UI:** Open the **Incidents** tab to inspect reconstructed BREACH/AUDIT windows,
-  per-tick reasoning, matching Gemini narratives (when configured), and **Export JSON**.
-- **UI:** Open **Instruments** for feed/session state; return to **Live** for the chart
-  and compact Structural Drift Audit summary.
+- **UI:** Open the **Incidents** tab for Peg Health Breach/Audit windows,
+  Peg Health snapshot copy, per-tick reasoning, matching Gemini narratives (when configured), and **Export JSON** (schema `2.1` includes `peg_health`).
+- **UI:** Open **Instruments** for feed/session state; return to **Live** for Peg Health and the chart.
 - **When Gemini is OFFLINE:** incident windows and `/api/history/trace` remain fully
-  deterministic; optional LLM narrative is additive.
+  deterministic; optional LLM narrative is additive and never changes Peg Health.
 - **Injected scenarios intentionally suppress Gemini background work:** the partner
   narrative is deterministic classification and replay, not an expected LLM card.
-- **Integration:** show OpenAPI, the telemetry WebSocket, exported incident JSON, and
-  the local webhook receiver. Injected webhooks require explicit demo opt-in.
+- **Integration:** show OpenAPI Peg Health, the telemetry WebSocket, band-transition
+  webhooks, exported incident JSON. Injected webhooks require explicit demo opt-in.
 
 ---
 
@@ -318,17 +330,23 @@ The app is documented in OpenAPI with an explicit product line:
   fresh observer (the same bounded maximum used by forensic APIs), construct
   **`DyopsSentinel`**, and start the Binance thread.
 
-**WebSockets**
-
-- **`/ws/telemetry`**: server → client JSON `{"type":"telemetry","payload":{...}}` (event result shaped like `EventResult`, plus `timestamp`, prices, `session_event_index`).
-- **`/ws/audits`**: initial chronological batch (recent audits), then **live tail** via DB polling.
-
 **REST**
 
-- **`GET /api/status`** — configuration surface: Gemini, feed mode, paths, **`global_events_total_sqlite`**, **`mahalanobis_breach_threshold`** (matches [`MAHALANOBIS_BREACH`](dyops_core/sentinel.py) used in breach logic).
+- **`GET /api/peg_health?instrument=`** — **typed** Peg Health (`PegHealthResponse`):
+  versioned band, basis, filtered_basis, mahalanobis, criticality, freshness,
+  regime_tag, summary, explainability, last_transition. Reconstructable from SQLite
+  when no live session tick exists. **Gemini never alters this.**
+- **`GET /api/status`** — configuration surface: Gemini, feed mode, paths,
+  **`global_events_total_sqlite`**, **`mahalanobis_breach_threshold`**,
+  **`peg_health_watch_threshold`**, **`peg_health_schema_version`**.
 - **`GET /api/pulse`** — **typed** pulse response (`PulseResponse`): `live`, **`last_tick_age_sec`**, `events_session`, `events_total_sqlite`, plus human **`summary`** and **`explainability`** strings (≤ ~200 / ~280 chars after clipping). Stale is inferred when **no tick for ~12s**.
 - **`GET /api/history?limit=`** — returns a **bare JSON array** of replay points (`HistoryPoint`): `t`, `measured_basis` (= ln(price ratio)), `filtered_basis`, `innovation`, `mahalanobis`, `valid`. Stable for charts and dumb consumers.
 - **`GET /api/history/trace?limit=`** — same replay as `/api/history`, wrapped as **`HistoryTraceBundle`**: top-level **`summary`** + **`explainability`** for the window, plus **`points[]`** where each row extends `HistoryPoint` with deterministic **`reasoning`** (Mahalanobis vs threshold, validity). **Gemini does not populate this.**
+
+**WebSockets**
+
+- **`/ws/telemetry`**: server → client JSON `{"type":"telemetry","payload":{...}}` (event result shaped like `EventResult`, plus `timestamp`, prices, `session_event_index`, additive **`peg_health`**).
+- **`/ws/audits`**: initial chronological batch (recent audits), then **live tail** via DB polling.
 
 **Explainability internals (replay)**
 
@@ -541,17 +559,18 @@ Interactive docs: **`http://127.0.0.1:8000/docs`** (REST only; WebSockets are su
 
 | Method / path | Role |
 |---------------|------|
+| `GET /api/peg_health?instrument=` | **Primary product object** — versioned Peg Health (`PegHealthResponse`) |
 | `GET /api/instruments` | Instrument ids, labels, live/stale state, current level, last Mahalanobis, feed metadata, and scoped event counts |
-| `GET /api/status` | Configuration plus queue depths, persistence health, dropped/failed ingestion counters, stale cutoff, and the 1,000-event replay bound |
+| `GET /api/status` | Configuration plus Peg Health schema/watch threshold, queue depths, persistence health, dropped/failed ingestion counters, stale cutoff, and the 1,000-event replay bound |
 | `GET /api/pulse?instrument=` | Instrument-scoped freshness, counts, `summary`, and `explainability` |
 | `GET /api/history?instrument=&limit=` | Instrument-scoped bare **`HistoryPoint[]`**, including `instrument_id` |
 | `GET /api/history/trace?instrument=&limit=` | Instrument-scoped trace bundle with deterministic per-tick `reasoning` |
 | `POST /api/demo/inject_scenario` | Explicit-demo-only synthetic injection; requires `X-Dyops-Demo-Secret` |
-| `POST /api/demo/reset` | Clears one demo instrument and resets observer/policy state; requires the demo secret |
-| `WebSocket /ws/telemetry` | Shared live stream; every payload includes `instrument_id` for client filtering |
+| `POST /api/demo/reset` | Clears one demo instrument and resets observer/policy/Peg Health state; requires the demo secret |
+| `WebSocket /ws/telemetry` | Live stream; every payload includes `instrument_id` and additive `peg_health` |
 | `WebSocket /ws/audits` | Snapshot + live tail of SQLite audits |
 
-**Compatibility note:** Integrations that expect a **raw array** from `/api/history` remain valid. Use **`/api/history/trace`** when you need **operator copy** or **per-tick reasoning** without touching Gemini.
+**Compatibility note:** Integrations that expect a **raw array** from `/api/history` remain valid. Use **`/api/peg_health`** for the issuer product object; use **`/api/history/trace`** when you need **per-tick reasoning**. Legacy nested `health` on telemetry is retained alongside `peg_health`.
 
 ---
 
@@ -563,23 +582,28 @@ Run both built-in feeds concurrently:
 DYOPS_INSTRUMENTS=stable,lst uvicorn backend.main:app --host 0.0.0.0 --port 8000
 ```
 
-For custom names and metadata, use a JSON array, for example `DYOPS_INSTRUMENTS='[{"id":"usdc-usdt","label":"USDC / USDT","feed_mode":"stable","physical_symbol":"USD","token_symbol":"USDCUSDT","synthetic":true},{"id":"eth-steth","label":"ETH / stETH","feed_mode":"lst","physical_symbol":"ETHUSDT","token_symbol":"STETHUSDT"}]'`. Thresholds remain global; observer state, SQLite history, pulse, and escalation routing are partitioned by instrument.
+For custom names and metadata, use a JSON array, for example `DYOPS_INSTRUMENTS='[{"id":"usdc-usdt","label":"USDC / USDT","feed_mode":"stable","physical_symbol":"USD","token_symbol":"USDCUSDT","synthetic":true},{"id":"eth-steth","label":"ETH / stETH","feed_mode":"lst","physical_symbol":"ETHUSDT","token_symbol":"STETHUSDT"}]'`. Thresholds remain global; observer state, SQLite history, pulse, Peg Health, and escalation routing are partitioned by instrument.
 
-Set `DYOPS_WEBHOOK_URLS` to one or more comma-separated webhook URLs. Use HTTPS for
-partner endpoints; localhost HTTP is supported for development. Dyops sends a JSON
-`POST` for every live **BREACH** and each cooldown-gated **AUDIT snapshot**. Simulated
-scenario webhooks additionally require `DYOPS_DEMO_WEBHOOKS=1`. Delivery runs outside
-the telemetry pump, has a 2-second timeout, and retries once.
+**Issuer path:** poll `GET /api/peg_health` **or** subscribe to `/ws/telemetry` and read
+`payload.peg_health`. Set `DYOPS_WEBHOOK_URLS` to one or more comma-separated webhook
+URLs. Dyops sends a JSON `POST` on every **Peg Health band transition** (issuer-style
+payload includes `band`, `band_transition`, and full `peg_health`). Simulated scenario
+webhooks additionally require `DYOPS_DEMO_WEBHOOKS=1`. Delivery runs outside the
+telemetry pump, has a 2-second timeout, and retries once.
 
-The payload contains `timestamp`, `level`, `mahalanobis`, `innovation`, `criticality_recent_pct`, `instrument_id`, and the pulse `summary` and `explainability` fields. It also contains `event_id` when an ID is already available; asynchronous SQLite writes mean it is normally omitted from live escalation payloads.
-
-This integration uses plain HTTP webhooks through `httpx`; it does not require a Slack or partner-specific SDK. **`GET /api/status`** reports `webhook_configured: true` whenever at least one non-empty URL is configured.
+See [`docs/INTEGRATION_EXAMPLES.md`](docs/INTEGRATION_EXAMPLES.md) for the full webhook
+shape. **`GET /api/status`** reports `webhook_configured: true` whenever at least one
+non-empty URL is configured.
 
 ---
 
 ### Data model notes
 
-- **EventResult / telemetry**: includes nested **`health`**, optional large **`snapshot`** on AUDIT-level ticks (can increase WebSocket payload size).
+- **Peg Health** (`dyops_core/peg_health.py`): versioned deterministic snapshot;
+  reconstructable via SQLite replay (same 1,000-event window as history/trace).
+  Gemini never alters it.
+- **EventResult / telemetry**: includes nested **`health`** (legacy), additive
+  **`peg_health`**, optional large **`snapshot`** on AUDIT-level ticks.
 - **SQLite `event_id`** on audits is **best-effort** (tied to writer state at insert time); for strict lineage, prefer timestamps and full `report_json`.
 - **Replay**: startup and forensic APIs share a bounded maximum of **1,000 most
   recent events per instrument**, oldest-first. Smaller API limits select a suffix.
@@ -588,10 +612,10 @@ This integration uses plain HTTP webhooks through `httpx`; it does not require a
   escalations call webhooks only under explicit `DYOPS_DEMO_WEBHOOKS=1`.
 - **Chart vs trace**: the UI refreshes forensic trace after demo injection and
   escalation events so incident copy does not lag the live chart.
-- **Incident export**: schema `2.0` separates deterministic replay from optional LLM
-  rows and records source, software version, client-clock export time, and explicit
-  unsigned/non-attestation metadata. Browser SHA-256 is comparison integrity only,
-  not a signature or legal seal.
+- **Incident export**: schema `2.1` includes a **Peg Health snapshot**, separates
+  deterministic replay from optional LLM rows, and records source, software version,
+  client-clock export time, and explicit unsigned/non-attestation metadata. Browser
+  SHA-256 is comparison integrity only, not a signature or legal seal.
 
 ---
 
@@ -690,8 +714,9 @@ Partner evidence pack: [`reports/robustness_report.md`](reports/robustness_repor
 
 Everything below is **roadmap**, not shipped in-repo unless separately noted:
 
-- **Multi-tenant auth / per-tenant API keys** — partition access and metering for partner deployments.
+- **Multi-tenant auth / per-tenant API keys** — partition access and metering for partner deployments (not in this Peg Health pass).
 - **Hosted vs BYO** — clarify packaging: customer VPC / single-tenant SaaS versus self-hosted bundle (Docker Compose / Helm TBD).
+- **Language SDKs** — thin clients that wrap `GET /api/peg_health` and band-transition webhooks.
 
 ---
 

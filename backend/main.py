@@ -36,6 +36,14 @@ from binance_feed import feed_threads_disabled, start_configured_feed_threads  #
 from database import PersistenceManager, REPLAY_WINDOW_EVENTS  # noqa: E402
 from instruments import InstrumentConfig, load_instruments  # noqa: E402
 from scenarios import get_scenario  # noqa: E402
+from peg_health import (  # noqa: E402
+    PEG_HEALTH_SCHEMA_VERSION,
+    apply_freshness,
+    band_changed,
+    build_peg_health,
+    replay_peg_health,
+    watch_threshold,
+)
 from sentinel import (  # noqa: E402
     AUDIT_COOLDOWN_TICKS,
     AUDITS_DIR,
@@ -229,6 +237,44 @@ def _event_result_model(er: EventResult) -> dict[str, Any]:
     }
 
 
+def _freshness_for_runtime(runtime: "InstrumentRuntime") -> tuple[bool, float | None]:
+    if runtime.last_tick_monotonic <= 0:
+        return False, None
+    age = time.monotonic() - runtime.last_tick_monotonic
+    return age <= STALE_CUTOFF_SEC, age
+
+
+def _peg_health_for_tick(
+    runtime: "InstrumentRuntime",
+    *,
+    timestamp: float,
+    physical_price: float,
+    token_price: float,
+    result: EventResult,
+) -> dict[str, Any]:
+    live, age = _freshness_for_runtime(runtime)
+    previous = runtime.peg_health
+    return build_peg_health(
+        instrument_id=runtime.config.id,
+        timestamp=timestamp,
+        physical_price=physical_price,
+        token_price=token_price,
+        filtered_basis=float(result.health.filtered_basis),
+        mahalanobis=float(result.health.mahalanobis_distance),
+        criticality=float(result.criticality_recent_pct),
+        measurement_valid=bool(result.health.measurement_valid),
+        level_name=result.level.name,
+        breach_threshold=float(MAHALANOBIS_BREACH),
+        live=live,
+        age_sec=age,
+        stale_cutoff_sec=STALE_CUTOFF_SEC,
+        previous_band=str(previous["band"]) if previous else None,
+        previous_transition=(
+            previous.get("last_transition") if previous else None
+        ),
+    )
+
+
 class ConnectionHub:
     def __init__(self) -> None:
         self._telemetry: dict[WebSocket, str | None] = {}
@@ -367,6 +413,7 @@ class InstrumentRuntime:
     last_mahalanobis: float | None = None
     criticality_recent_pct: float = 0.0
     ingestion_source: str = "none"
+    peg_health: dict[str, Any] | None = None
 
 
 _instrument_runtimes: dict[str, InstrumentRuntime] = {}
@@ -505,7 +552,11 @@ async def _send_escalation_webhook(
         except Exception:  # noqa: BLE001
             pass
     ingestion_source = str(model["ingestion_source"])
-    if ingestion_source == "live":
+    peg = model.get("peg_health")
+    if isinstance(peg, dict) and peg.get("summary") and peg.get("explainability"):
+        summary = str(peg["summary"])
+        explainability = str(peg["explainability"])
+    elif ingestion_source == "live":
         summary, explainability = _pulse_narrative(
             live=True,
             age_sec=0.0,
@@ -536,6 +587,11 @@ async def _send_escalation_webhook(
         "summary": summary,
         "explainability": explainability,
     }
+    if isinstance(peg, dict):
+        payload["peg_health"] = peg
+        payload["band"] = peg.get("band")
+        if peg.get("last_transition") is not None:
+            payload["band_transition"] = peg["last_transition"]
     if model.get("event_id") is not None:
         payload["event_id"] = model["event_id"]
     await webhooks.send_webhooks(payload)
@@ -615,6 +671,7 @@ async def _telemetry_pump() -> None:
                 _demo_injection_active = False
             continue
         previous_level = runtime.level
+        previous_peg = runtime.peg_health
         try:
             result = runtime.sentinel.process_event(
                 ts,
@@ -644,6 +701,14 @@ async def _telemetry_pump() -> None:
         runtime.ingestion_source = ingestion_source
         mahalanobis = float(result.health.mahalanobis_distance)
         runtime.last_mahalanobis = mahalanobis if math.isfinite(mahalanobis) else None
+        peg = _peg_health_for_tick(
+            runtime,
+            timestamp=ts,
+            physical_price=phys,
+            token_price=tok,
+            result=result,
+        )
+        runtime.peg_health = peg
         if runtime.config.id == _primary_instrument_id:
             _last_tick_monotonic = runtime.last_tick_monotonic
             _session_event_count = runtime.session_event_count
@@ -654,13 +719,13 @@ async def _telemetry_pump() -> None:
         model["token_price"] = tok
         model["session_event_index"] = runtime.session_event_count
         model["ingestion_source"] = ingestion_source
+        model["peg_health"] = peg
         if demo_scenario is not None:
             model["demo_scenario"] = demo_scenario
         simulated_webhooks = os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1"
         webhook_allowed = ingestion_source == "live" or simulated_webhooks
-        if webhook_allowed and (
-            result.level.name == "BREACH" or result.snapshot is not None
-        ):
+        # Partner escalation: fire on Peg Health band transitions (not every BREACH tick).
+        if webhook_allowed and band_changed(previous_peg, peg):
             _schedule_escalation_webhook(
                 model,
                 session_event_count=runtime.session_event_count,
@@ -710,7 +775,9 @@ app = FastAPI(
     title="Dyops API",
     version=SOFTWARE_VERSION,
     description=(
-        "High-fidelity telemetry API for monitoring digital asset basis risk and peg stability."
+        "Peg Health intelligence API for stablecoin / RWA / token issuers: "
+        "deterministic band classification, REST + WebSocket telemetry, and "
+        "SQLite-reconstructable forensics. Gemini never alters Peg Health."
     ),
     lifespan=lifespan,
 )
@@ -738,6 +805,8 @@ class StatusResponse(BaseModel):
     db_path: str
     global_events_total_sqlite: int
     mahalanobis_breach_threshold: float
+    peg_health_watch_threshold: float
+    peg_health_schema_version: str
     criticality_window_events: int
     criticality_audit_pct: float
     audit_cooldown_ticks: int
@@ -757,6 +826,38 @@ class StatusResponse(BaseModel):
     demo_webhooks_enabled: bool
     feed_disabled: bool
     software_version: str
+
+
+class PegHealthFreshness(BaseModel):
+    live: bool
+    age_sec: float | None
+    stale_cutoff_sec: float
+
+
+class PegHealthTransition(BaseModel):
+    from_band: str
+    to_band: str
+    at: float
+
+
+class PegHealthResponse(BaseModel):
+    """Versioned Peg Health product object (deterministic; Gemini never alters)."""
+
+    schema_version: str
+    instrument_id: str
+    timestamp: float
+    band: str
+    basis: float | None
+    filtered_basis: float
+    mahalanobis: float
+    criticality: float
+    freshness: PegHealthFreshness
+    regime_tag: str
+    summary: str
+    explainability: str
+    last_transition: PegHealthTransition | None
+    measurement_valid: bool
+    level: str
 
 
 class InstrumentResponse(BaseModel):
@@ -831,6 +932,8 @@ async def api_status() -> StatusResponse:
         db_path=str(_persistence.db_path.resolve()),
         global_events_total_sqlite=await asyncio.to_thread(_persistence.count_events),
         mahalanobis_breach_threshold=float(MAHALANOBIS_BREACH),
+        peg_health_watch_threshold=watch_threshold(float(MAHALANOBIS_BREACH)),
+        peg_health_schema_version=PEG_HEALTH_SCHEMA_VERSION,
         criticality_window_events=int(CRITICALITY_WINDOW_EVENTS),
         criticality_audit_pct=float(CRITICALITY_AUDIT_PCT),
         audit_cooldown_ticks=int(AUDIT_COOLDOWN_TICKS),
@@ -989,6 +1092,7 @@ async def reset_demo(
         runtime.last_mahalanobis = None
         runtime.criticality_recent_pct = 0.0
         runtime.ingestion_source = "none"
+        runtime.peg_health = None
         if runtime.config.id == _primary_instrument_id:
             _sentinel = runtime.sentinel
             _session_event_count = 0
@@ -1038,6 +1142,45 @@ class PulseResponse(BaseModel):
     summary: str = ""
     explainability: str = ""
     ingestion_source: str = "none"
+
+
+@app.get("/api/peg_health", response_model=PegHealthResponse)
+async def api_peg_health(instrument: str | None = None) -> PegHealthResponse:
+    """
+    Current Peg Health for an instrument.
+
+    Live path returns the last processed snapshot (refreshed freshness).
+    With no session ticks yet, reconstructs from the SQLite replay window
+    (same bound as /api/history) so partners always get a stable object.
+    """
+    runtime = _instrument_runtime(instrument)
+    live, age = _freshness_for_runtime(runtime)
+    if runtime.peg_health is not None:
+        peg = apply_freshness(
+            runtime.peg_health,
+            live=live,
+            age_sec=age,
+            stale_cutoff_sec=STALE_CUTOFF_SEC,
+            breach_threshold=float(MAHALANOBIS_BREACH),
+        )
+        return PegHealthResponse(**peg)
+
+    assert _persistence is not None
+    rows = await asyncio.to_thread(
+        lambda: _persistence.load_recent_events(
+            REPLAY_WINDOW_EVENTS,
+            instrument_id=runtime.config.id,
+        )
+    )
+    peg = replay_peg_health(
+        rows,
+        instrument_id=runtime.config.id,
+        breach_threshold=float(MAHALANOBIS_BREACH),
+        stale_cutoff_sec=STALE_CUTOFF_SEC,
+        live=live,
+        age_sec=age,
+    )
+    return PegHealthResponse(**peg)
 
 
 @app.get("/api/history", response_model=list[HistoryPoint])

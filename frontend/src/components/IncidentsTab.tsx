@@ -6,6 +6,7 @@ import {
   buildIncidentExport,
   downloadIncidentExport,
   FORENSIC_NON_CLAIM,
+  pegHealthFromIncident,
 } from "@/lib/incidentExport"
 import { deriveIncidentWindows, incidentSummary } from "@/lib/incidents"
 import type { AuditRow, HistoryTraceBundle } from "@/types/telemetry"
@@ -18,6 +19,7 @@ type IncidentsTabProps = {
   criticalityWindowEvents: number
   criticalityAuditPct: number
   softwareVersion: string
+  staleCutoffSec?: number
 }
 
 function formatTime(timestamp: number, includeDate = false): string {
@@ -45,6 +47,7 @@ export function IncidentsTab({
   criticalityWindowEvents,
   criticalityAuditPct,
   softwareVersion,
+  staleCutoffSec = 12,
 }: IncidentsTabProps) {
   const incidents = useMemo(
     () =>
@@ -85,6 +88,16 @@ export function IncidentsTab({
     selected && trace
       ? trace.points.slice(selected.startIndex, selected.endIndex + 1)
       : []
+  const selectedPegHealth =
+    selected && selectedPoints.length > 0
+      ? pegHealthFromIncident(
+          instrumentId,
+          selected,
+          selectedPoints,
+          breachThreshold,
+          staleCutoffSec,
+        )
+      : null
 
   return (
     <main className="flex min-h-0 flex-1 p-4">
@@ -92,10 +105,11 @@ export function IncidentsTab({
         <div className="flex min-h-0 w-full shrink-0 flex-col border-b border-[var(--color-border)] lg:w-[330px] lg:border-b-0 lg:border-r">
           <div className="border-b border-[var(--color-border)] px-4 py-3">
             <h1 className="text-xs font-medium uppercase tracking-widest text-zinc-500">
-              Incident windows
+              Peg Health incidents
             </h1>
             <p className="mt-1 font-mono-nums text-[11px] leading-relaxed text-zinc-600">
-              BREACH and AUDIT runs reconstructed from the latest trace and audit tail.
+              Breach and Audit Peg Health windows reconstructed from the latest
+              trace and audit tail.
             </p>
           </div>
           <ScrollArea className="min-h-[180px] flex-1">
@@ -163,6 +177,24 @@ export function IncidentsTab({
                   <p className="mt-2 max-w-3xl font-mono-nums text-[11px] leading-relaxed text-zinc-500">
                     {incidentSummary(selected, selectedPoints, breachThreshold)}
                   </p>
+                  {selectedPegHealth ? (
+                    <div className="mt-3 max-w-3xl border-l border-zinc-700 pl-3">
+                      <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-600">
+                        Peg Health snapshot
+                      </p>
+                      <p className="mt-1 font-mono-nums text-[11px] text-zinc-400">
+                        {selectedPegHealth.band} · {selectedPegHealth.regime_tag} · M{" "}
+                        {selectedPegHealth.mahalanobis.toFixed(3)} · crit{" "}
+                        {selectedPegHealth.criticality.toFixed(1)}%
+                      </p>
+                      <p
+                        className="mt-1 font-mono-nums text-[10px] leading-relaxed text-zinc-600"
+                        title={selectedPegHealth.explainability}
+                      >
+                        {selectedPegHealth.summary}
+                      </p>
+                    </div>
+                  ) : null}
                   <div className="mt-2 flex flex-wrap gap-1.5">
                     {Array.from(
                       new Set(
@@ -192,6 +224,7 @@ export function IncidentsTab({
                       selected,
                       selectedPoints,
                       breachThreshold,
+                      staleCutoffSec,
                     ).then(downloadIncidentExport)
                   }}
                   className="inline-flex items-center gap-1.5 rounded-md border border-zinc-700 px-2.5 py-1.5 font-mono-nums text-[10px] uppercase tracking-wide text-zinc-400 transition-colors hover:border-zinc-600 hover:text-zinc-200"

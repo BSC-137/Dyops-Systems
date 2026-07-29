@@ -1,6 +1,6 @@
 {
   "artifact_type": "dyops_incident_export",
-  "schema_version": "2.0",
+  "schema_version": "2.1",
   "exported_at": "2026-07-22T12:00:00.000Z",
   "instrument_id": "default",
   "software": {
@@ -9,7 +9,7 @@
   },
   "classification": {
     "unsigned": true,
-    "non_claim": "Operational forensic export — not a regulatory attestation or signed compliance report.",
+    "non_claim": "Operational forensic export \u2014 not a regulatory attestation or signed compliance report.",
     "assembled_by": "dyops_frontend",
     "exported_at_source": "client_browser_clock"
   },
@@ -28,10 +28,35 @@
     "peak_mahalanobis": 18.2793,
     "criticality_peak_pct": 12.5
   },
+  "peg_health": {
+    "schema_version": "1.0",
+    "instrument_id": "default",
+    "timestamp": 1753185600.000001,
+    "band": "Breach",
+    "basis": 0.0202027,
+    "filtered_basis": 0.005112,
+    "mahalanobis": 12.741,
+    "criticality": 12.5,
+    "freshness": {
+      "live": false,
+      "age_sec": null,
+      "stale_cutoff_sec": 12.0
+    },
+    "regime_tag": "correlation_fracture",
+    "summary": "Peg Health Breach \u00b7 Mahalanobis 12.74 above 3 \u00b7 crit 12.5%.",
+    "explainability": "Normalized innovation exceeded the sentinel breach threshold \u2014 operational correlation fracture signal, not a default probability.",
+    "last_transition": {
+      "from_band": "Healthy",
+      "to_band": "Breach",
+      "at": 1753185600
+    },
+    "measurement_valid": true,
+    "level": "BREACH"
+  },
   "deterministic_evidence": {
     "source": "server_deterministic_replay",
     "mahalanobis_breach_threshold": 3,
-    "summary": "BREACH window · 2 ticks · 2 breach moments · peak Mahalanobis 18.279",
+    "summary": "BREACH window \u00b7 2 ticks \u00b7 2 breach moments \u00b7 peak Mahalanobis 18.279",
     "points": [
       {
         "instrument_id": "default",
@@ -65,5 +90,5 @@
     "audits": []
   },
   "integrity_notice": "SHA-256 covers canonical JSON without content_sha256. It is tamper-evidence for comparison, not a digital signature or legal seal.",
-  "content_sha256": "558c3e8702d3232507f65636f814abfa93a3de265241bf8403e1656024be8fd6"
+  "content_sha256": "1de114a5cbbe7e9991f9136fbc111a3d887cd3976c71477a4c00e2c293a99db2"
 }

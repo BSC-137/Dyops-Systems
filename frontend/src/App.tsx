@@ -27,6 +27,7 @@ import type {
   ChartPoint,
   HistoryTraceBundle,
   InstrumentInfo,
+  PegHealth,
   PulseResponse,
   SentinelLevel,
   StatusResponse,
@@ -152,6 +153,15 @@ function levelBadgeVariant(
   return "success"
 }
 
+function pegBandBadgeVariant(
+  band: string,
+): "success" | "warning" | "destructive" | "outline" {
+  if (band === "Audit") return "destructive"
+  if (band === "Breach") return "warning"
+  if (band === "Watch") return "outline"
+  return "success"
+}
+
 type HistoryApiRow = {
   instrument_id?: string
   t: number
@@ -200,6 +210,7 @@ export default function App() {
   const [snapshotHighlighted, setSnapshotHighlighted] = useState(false)
   const [traceBundle, setTraceBundle] = useState<HistoryTraceBundle | null>(null)
   const [pulseSummaryLine, setPulseSummaryLine] = useState("")
+  const [pegHealth, setPegHealth] = useState<PegHealth | null>(null)
   const [telemetryStreamPaused, setTelemetryStreamPaused] = useState(false)
   const chartDataRef = useRef<ChartPoint[]>([])
   const auditsRef = useRef<Map<number, AuditRow>>(new Map())
@@ -241,6 +252,12 @@ export default function App() {
         setCriticalityRecentPct(latest.criticality_recent_pct)
         setIngestionSource(latest.ingestion_source)
         setDemoScenario(latest.demo_scenario ?? null)
+        if (latest.peg_health) {
+          setPegHealth(latest.peg_health)
+          setPulseSummaryLine(
+            `${latest.peg_health.summary} · ${latest.peg_health.explainability}`,
+          )
+        }
       }, TELEMETRY_PAINT_INTERVAL_MS)
     },
     [mergeChart],
@@ -447,7 +464,7 @@ export default function App() {
   useEffect(() => {
     const tick = async () => {
       try {
-        const [pulseR, statusR, instrumentsR] = await Promise.all([
+        const [pulseR, statusR, instrumentsR, pegR] = await Promise.all([
           fetch(
             selectedInstrumentId
               ? `/api/pulse?instrument=${encodeURIComponent(selectedInstrumentId)}`
@@ -455,6 +472,11 @@ export default function App() {
           ),
           fetch("/api/status"),
           fetch("/api/instruments"),
+          fetch(
+            selectedInstrumentId
+              ? `/api/peg_health?instrument=${encodeURIComponent(selectedInstrumentId)}`
+              : "/api/peg_health",
+          ),
         ])
         if (pulseR.ok) {
           const p = (await pulseR.json()) as PulseResponse
@@ -462,8 +484,21 @@ export default function App() {
           setPulseAgeSec(p.last_tick_age_sec)
           setIngestionSource(p.ingestion_source)
           setEventsTotal(Number(p.events_total_sqlite ?? 0))
-          const summary = (p.summary ?? "").trim()
-          const explain = (p.explainability ?? "").trim()
+          if (!pegR.ok) {
+            const summary = (p.summary ?? "").trim()
+            const explain = (p.explainability ?? "").trim()
+            setPulseSummaryLine(
+              summary && explain
+                ? `${summary} · ${explain}`
+                : summary || explain || "",
+            )
+          }
+        }
+        if (pegR.ok) {
+          const peg = (await pegR.json()) as PegHealth
+          setPegHealth(peg)
+          const summary = (peg.summary ?? "").trim()
+          const explain = (peg.explainability ?? "").trim()
           setPulseSummaryLine(
             summary && explain
               ? `${summary} · ${explain}`
@@ -737,7 +772,14 @@ export default function App() {
         <div className="flex flex-wrap items-center justify-end gap-4">
           <div className="flex items-center gap-2 text-xs text-zinc-500">
             <Radio className="size-3.5 text-zinc-500" aria-hidden />
-            <span className="uppercase tracking-wide">System pulse</span>
+            <span className="uppercase tracking-wide">Peg Health</span>
+            <Badge
+              variant={pegBandBadgeVariant(pegHealth?.band ?? "Healthy")}
+              className="text-[10px]"
+              title={pegHealth?.explainability ?? "Peg Health band"}
+            >
+              {pegHealth?.band ?? "—"}
+            </Badge>
             <span
               className={`font-mono-nums text-xs font-medium ${pulseLive ? "text-emerald-600" : "text-zinc-500"}`}
             >
@@ -755,6 +797,7 @@ export default function App() {
             <Badge
               variant={levelBadgeVariant(sentinelLevel)}
               className="text-[10px]"
+              title="Sentinel escalation level (feeds Peg Health band)"
             >
               {sentinelLevel}
             </Badge>
@@ -886,7 +929,7 @@ export default function App() {
           <Card className="flex min-h-0 flex-1 flex-col border-[var(--color-border)] bg-transparent shadow-none">
             <CardHeader className="pb-2">
               <CardTitle className="text-xs font-medium uppercase tracking-widest text-zinc-500">
-                Real-Time Telemetry
+                Peg Health · Live
               </CardTitle>
               {pulseSummaryLine ? (
                 <p
@@ -897,12 +940,16 @@ export default function App() {
                 </p>
               ) : null}
               <p className="mt-2 max-w-5xl text-[10px] leading-relaxed text-zinc-600">
-                <span className="text-zinc-400">Filtered basis</span> estimates the
-                current log price relationship.{" "}
-                <span className="text-zinc-400">Innovation</span> is the new residual
-                versus that estimate.{" "}
-                <span className="text-zinc-400">Mahalanobis</span> normalizes the
-                residual by model uncertainty; it is not a default probability.
+                Peg Health bands ({" "}
+                <span className="text-zinc-400">Healthy / Watch / Breach / Audit</span>
+                ) are the product noun for issuers. Chart series below are supporting
+                evidence:{" "}
+                <span className="text-zinc-400">Filtered basis</span>,{" "}
+                <span className="text-zinc-400">Innovation</span>, and{" "}
+                <span className="text-zinc-400">Mahalanobis</span> (normalized surprise —
+                not a default probability). Poll{" "}
+                <span className="text-zinc-400">GET /api/peg_health</span> or subscribe
+                to <span className="text-zinc-400">/ws/telemetry</span>.
               </p>
             </CardHeader>
             <CardContent className="min-h-0 flex-1 px-2 pb-2 pt-0">
@@ -1037,7 +1084,7 @@ export default function App() {
             >
               <div className="min-w-0 flex-1">
                 <p className="text-[10px] font-medium uppercase tracking-widest text-zinc-600">
-                  Structural Drift Audit
+                  Peg Health · Forensic window
                 </p>
                 {traceBundle ? (
                   <div className="mt-1 border-l border-zinc-700 pl-2">
@@ -1082,6 +1129,7 @@ export default function App() {
             criticalityWindowEvents={criticalityWindowEvents}
             criticalityAuditPct={criticalityAuditPct}
             softwareVersion={softwareVersion}
+            staleCutoffSec={staleCutoffSec}
           />
         </Suspense>
       ) : (

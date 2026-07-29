@@ -3,10 +3,14 @@ import type {
   AuditRow,
   HistoryTracePoint,
   IncidentWindow,
+  PegHealth,
+  PegHealthBand,
 } from "@/types/telemetry"
 
 export const FORENSIC_NON_CLAIM =
   "Operational forensic export — not a regulatory attestation or signed compliance report."
+
+export const PEG_HEALTH_SCHEMA_VERSION = "1.0"
 
 export function stableStringify(value: unknown): string {
   if (value === null || typeof value !== "object") {
@@ -36,9 +40,61 @@ async function sha256Hex(value: string): Promise<string | null> {
     .join("")
 }
 
+/** Deterministic Peg Health snapshot for an incident window (export / UI). */
+export function pegHealthFromIncident(
+  instrumentId: string,
+  incident: IncidentWindow,
+  points: HistoryTracePoint[],
+  breachThreshold: number,
+  staleCutoffSec: number,
+): PegHealth {
+  const last = points[points.length - 1]
+  const band: PegHealthBand =
+    incident.kind === "AUDIT"
+      ? "Audit"
+      : incident.kind === "BREACH"
+        ? "Breach"
+        : "Watch"
+  const mahalanobis = last?.mahalanobis ?? incident.peakMahalanobis
+  const criticality = incident.criticalityPeakPct
+  const summary =
+    band === "Audit"
+      ? `Peg Health Audit · rolling criticality ${criticality.toFixed(1)}% · M ${mahalanobis.toFixed(2)}.`
+      : `Peg Health Breach · Mahalanobis ${mahalanobis.toFixed(2)} above ${breachThreshold} · crit ${criticality.toFixed(1)}%.`
+  const explainability =
+    band === "Audit"
+      ? "Rolling criticality crossed the audit threshold. Deterministic Peg Health escalated to Audit; optional Gemini narrative never changes this band."
+      : "Normalized innovation exceeded the sentinel breach threshold — operational correlation fracture signal, not a default probability."
+  return {
+    schema_version: PEG_HEALTH_SCHEMA_VERSION,
+    instrument_id: instrumentId,
+    timestamp: last?.t ?? incident.endT,
+    band,
+    basis: last?.measured_basis ?? null,
+    filtered_basis: last?.filtered_basis ?? 0,
+    mahalanobis,
+    criticality,
+    freshness: {
+      live: false,
+      age_sec: null,
+      stale_cutoff_sec: staleCutoffSec,
+    },
+    regime_tag: band === "Audit" ? "escalated_review" : "correlation_fracture",
+    summary,
+    explainability,
+    last_transition: {
+      from_band: "Healthy",
+      to_band: band,
+      at: incident.startT,
+    },
+    measurement_valid: last?.valid ?? true,
+    level: incident.kind,
+  }
+}
+
 type IncidentExportBody = {
   artifact_type: "dyops_incident_export"
-  schema_version: "2.0"
+  schema_version: "2.1"
   exported_at: string
   instrument_id: string
   software: {
@@ -62,6 +118,7 @@ type IncidentExportBody = {
     peak_mahalanobis: number
     criticality_peak_pct: number
   }
+  peg_health: PegHealth
   deterministic_evidence: {
     source: "server_deterministic_replay"
     mahalanobis_breach_threshold: number
@@ -86,11 +143,19 @@ export async function buildIncidentExport(
   incident: IncidentWindow,
   points: HistoryTracePoint[],
   breachThreshold: number,
+  staleCutoffSec = 12,
 ): Promise<IncidentExportArtifact> {
   const audits = incident.audits
+  const peg_health = pegHealthFromIncident(
+    instrumentId,
+    incident,
+    points,
+    breachThreshold,
+    staleCutoffSec,
+  )
   const body: IncidentExportBody = {
     artifact_type: "dyops_incident_export",
-    schema_version: "2.0",
+    schema_version: "2.1",
     exported_at: new Date().toISOString(),
     instrument_id: instrumentId,
     software: {
@@ -122,6 +187,7 @@ export async function buildIncidentExport(
       peak_mahalanobis: incident.peakMahalanobis,
       criticality_peak_pct: incident.criticalityPeakPct,
     },
+    peg_health,
     deterministic_evidence: {
       source: "server_deterministic_replay",
       mahalanobis_breach_threshold: breachThreshold,

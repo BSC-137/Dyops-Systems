@@ -1,5 +1,36 @@
 export type SentinelLevel = "MONITORING" | "BREACH" | "AUDIT"
 
+export type PegHealthBand = "Healthy" | "Watch" | "Breach" | "Audit"
+
+export interface PegHealthTransition {
+  from_band: PegHealthBand | string
+  to_band: PegHealthBand | string
+  at: number
+}
+
+/** GET /api/peg_health and additive /ws/telemetry.peg_health */
+export interface PegHealth {
+  schema_version: string
+  instrument_id: string
+  timestamp: number
+  band: PegHealthBand | string
+  basis: number | null
+  filtered_basis: number
+  mahalanobis: number
+  criticality: number
+  freshness: {
+    live: boolean
+    age_sec: number | null
+    stale_cutoff_sec: number
+  }
+  regime_tag: string
+  summary: string
+  explainability: string
+  last_transition: PegHealthTransition | null
+  measurement_valid: boolean
+  level: SentinelLevel | string
+}
+
 export interface TelemetryPayload {
   instrument_id?: string
   level: SentinelLevel
@@ -17,6 +48,7 @@ export interface TelemetryPayload {
     measurement_valid: boolean
     breach: boolean
   }
+  peg_health?: PegHealth
   snapshot: Record<string, unknown> | null
   criticality_recent_pct: number
 }
@@ -52,6 +84,8 @@ export interface StatusResponse {
   db_path: string
   global_events_total_sqlite: number
   mahalanobis_breach_threshold: number
+  peg_health_watch_threshold?: number
+  peg_health_schema_version?: string
   criticality_window_events: number
   criticality_audit_pct: number
   audit_cooldown_ticks: number
