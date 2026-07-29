@@ -72,10 +72,15 @@ def slow_drift(seed: int = 11) -> Scenario:
             "drift_bps": 50,
             "drift_ticks": drift_ticks,
             "drift_start_tick": WARMUP_TICKS,
+            # Sentinel Mahalanobis policy remains intentionally silent on this path.
             "expected_terminal_level": "MONITORING",
             "expected_escalation": False,
-            # TODO (Option B): require breach if product wants slow-drift alarms.
-            "thresholds": {"max_breaches": 0},
+            "thresholds": {
+                "max_breaches": 0,
+                # Regime layer (always computed; shadow by default) must catch erosion.
+                "min_regime_slow_erosion_ticks": 1,
+                "max_regime_alerts_pre_anomaly": 2,
+            },
         },
     )
 
@@ -101,6 +106,7 @@ def sudden_depeg(seed: int = 13) -> Scenario:
             "thresholds": {
                 "min_breaches": 1,
                 "max_time_to_first_breach_ticks": 5,
+                "min_regime_sudden_dislocation_ticks": 1,
             },
         },
     )
@@ -165,6 +171,8 @@ def oracle_lag(seed: int = 19) -> Scenario:
             "thresholds": {
                 "max_time_to_first_breach_ticks": 20,
                 "max_audit_pct": 90.0,
+                # Prefer classifying oscillating lag as feed/oracle fault when present.
+                "min_regime_feed_fault_or_elevated_ticks": 1,
             },
         },
     )
@@ -221,6 +229,7 @@ def recovery_after_shock(seed: int = 29) -> Scenario:
             "thresholds": {
                 "min_breaches": 1,
                 "require_return_to_monitoring": True,
+                "min_regime_sudden_dislocation_ticks": 1,
             },
         },
     )

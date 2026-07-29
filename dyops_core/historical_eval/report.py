@@ -25,10 +25,14 @@ def render_markdown(result: dict[str, Any]) -> str:
         "slow_drift",
         "dyops_observer_only",
         "dyops_current",
+        "dyops_regime",
+        "dyops_regime_defaults",
         "dyops_calibrated_global",
         "dyops_calibrated_per_instrument",
     ]
     for name in order:
+        if name not in detectors:
+            continue
         metrics = detectors[name]["metrics"]
         rows.append(
             "| "
@@ -94,12 +98,17 @@ def render_markdown(result: dict[str, Any]) -> str:
             "These verdicts apply only to this held-out synthetic fixture. A tie or win here "
             "does not establish operational value on market history.",
             "",
+            "## Deployment posture (regime layer)",
+            "",
+            _deployment_posture(result),
+            "",
             "## Ablations included",
             "",
             "- Dyops observer-only versus observer plus rolling criticality.",
             "- Production parameters versus globally and per-instrument calibrated parameters.",
             "- Replay warm-up sizes of 0, 10, 20, and 40 events.",
             "- Current Dyops policy versus an explicit slow-drift detector.",
+            "- Current Dyops policy versus the deterministic Peg Health regime layer.",
             "- Sampling strides 2/3 and deterministic 10% missing-observation sensitivity.",
             "",
             "## Data and label limitations",
@@ -108,4 +117,45 @@ def render_markdown(result: dict[str, Any]) -> str:
             *catalog_limits,
             "",
         ]
+    )
+
+
+def _deployment_posture(result: dict[str, Any]) -> str:
+    """Honest shadow-vs-active guidance from held-out recommendations."""
+    recs = result.get("recommendations") or {}
+    regime_keys = [
+        key
+        for key in (
+            "dyops_regime_vs_absolute_basis",
+            "dyops_regime_vs_rolling_z",
+            "dyops_regime_vs_ewma_z",
+        )
+        if key in recs
+    ]
+    if not regime_keys:
+        return (
+            "Regime layer not present in this result. Live default remains "
+            "**shadow** (`DYOPS_REGIME_ACTIVE` unset)."
+        )
+    beats = sum(
+        1
+        for key in regime_keys
+        if "beats_baseline" in recs[key].get("verdict", "")
+    )
+    vs_current = recs.get("dyops_regime_vs_dyops_current", {})
+    if beats == len(regime_keys):
+        return (
+            f"Regime layer beats absolute_basis / rolling_z / ewma_z on this fixture "
+            f"({beats}/{len(regime_keys)}). Operators may consider "
+            "`DYOPS_REGIME_ACTIVE=1` after partner validation. "
+            f"Vs dyops_current: `{vs_current.get('verdict', 'n/a')}`."
+        )
+    return (
+        f"Regime layer does **not** dominate absolute_basis / rolling_z / ewma_z on "
+        f"this fixture ({beats}/{len(regime_keys)} baseline wins). "
+        "Keep live default in **shadow** mode (emit `regime_tag` / reasoning; do not "
+        "elevate Peg Health band) until a stronger held-out story exists. "
+        f"Vs dyops_current: `{vs_current.get('verdict', 'n/a')}` — "
+        f"{vs_current.get('basis', '')}. Scenario suite still requires "
+        "`slow_peg_erosion` on `slow_drift` while sentinel `max_breaches` stays 0."
     )

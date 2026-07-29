@@ -17,6 +17,7 @@ from .detectors import (
     AbsoluteBasisDetector,
     CUSUMDetector,
     DyopsDetector,
+    DyopsRegimeDetector,
     EWMADetector,
     RollingMADDetector,
     RollingZDetector,
@@ -74,6 +75,17 @@ def _factories() -> dict[str, Factory]:
             criticality_audit_pct=p["criticality_audit_pct"],
             warmup_events=w,
         ),
+        "dyops_regime": lambda p, w: DyopsRegimeDetector(
+            theta=p.get("theta", 1.0),
+            mahalanobis_threshold=p.get("mahalanobis_threshold", 3.0),
+            slow_short_window=int(p["slow_short_window"]),
+            slow_long_window=int(p["slow_long_window"]),
+            slow_threshold_bps=p["slow_threshold_bps"],
+            slow_persist_ticks=int(p["slow_persist_ticks"]),
+            oracle_min_sign_flips=int(p["oracle_min_sign_flips"]),
+            oracle_max_abs_mean_basis_bps=p["oracle_max_abs_mean_basis_bps"],
+            warmup_events=w,
+        ),
     }
 
 
@@ -114,6 +126,18 @@ def _grids() -> dict[str, list[dict[str, Any]]]:
                 "mahalanobis_threshold": [2.5, 3.0, 3.5],
                 "criticality_window": [20],
                 "criticality_audit_pct": [10.0, 15.0, 20.0],
+            }
+        ),
+        "dyops_regime": parameter_grid(
+            {
+                "slow_short_window": [6, 8],
+                "slow_long_window": [32, 40],
+                "slow_threshold_bps": [5.0, 8.0, 12.0],
+                "slow_persist_ticks": [3, 4],
+                "oracle_min_sign_flips": [4, 5],
+                "oracle_max_abs_mean_basis_bps": [12.0, 15.0],
+                "mahalanobis_threshold": [3.0],
+                "theta": [1.0],
             }
         ),
     }
@@ -261,17 +285,61 @@ def _evaluate_configuration(
 
 
 def _recommendations(results: dict[str, Any]) -> dict[str, dict[str, str]]:
-    dyops = results["dyops_current"]["metrics"]
-    out: dict[str, dict[str, str]] = {}
-    for baseline in (
+    """Compare production dyops_current and dyops_regime against naive baselines."""
+
+    def _compare(primary: str, baselines: tuple[str, ...]) -> dict[str, dict[str, str]]:
+        dyops = results[primary]["metrics"]
+        out: dict[str, dict[str, str]] = {}
+        for baseline in baselines:
+            other = results[baseline]["metrics"]
+            dr = dyops.get("event_recall")
+            br = other.get("event_recall")
+            df = dyops.get("false_alerts_per_instrument_day")
+            bf = other.get("false_alerts_per_instrument_day")
+            dd = dyops.get("mean_alert_duration_sec")
+            bd = other.get("mean_alert_duration_sec")
+            dd_cmp = float("inf") if dd is None else dd
+            bd_cmp = float("inf") if bd is None else bd
+            if dr is None or br is None:
+                verdict = "insufficient_labels"
+            elif (
+                dr >= br
+                and df <= bf
+                and dd_cmp <= bd_cmp
+                and (dr > br or df < bf or dd_cmp < bd_cmp)
+            ):
+                verdict = f"{primary}_beats_baseline_on_this_fixture"
+            elif (
+                dr <= br
+                and df >= bf
+                and dd_cmp >= bd_cmp
+                and (dr < br or df > bf or dd_cmp > bd_cmp)
+            ):
+                verdict = f"{primary}_does_not_beat_baseline_on_this_fixture"
+            else:
+                verdict = f"no_overall_{primary}_advantage_demonstrated"
+            out[f"{primary}_vs_{baseline}"] = {
+                "verdict": verdict,
+                "basis": (
+                    f"held-out event recall {dr} vs {br}; false alerts/instrument-day "
+                    f"{df} vs {bf}; mean alert duration {dd}s vs {bd}s"
+                ),
+            }
+        return out
+
+    baselines = (
         "absolute_basis",
         "rolling_z",
         "ewma_z",
         "rolling_mad",
         "cusum",
         "slow_drift",
-    ):
+    )
+    # Preserve legacy keys for dyops_current vs each baseline.
+    legacy: dict[str, dict[str, str]] = {}
+    for baseline in baselines:
         other = results[baseline]["metrics"]
+        dyops = results["dyops_current"]["metrics"]
         dr = dyops.get("event_recall")
         br = other.get("event_recall")
         df = dyops.get("false_alerts_per_instrument_day")
@@ -298,11 +366,39 @@ def _recommendations(results: dict[str, Any]) -> dict[str, dict[str, str]]:
             verdict = "dyops_does_not_beat_baseline_on_this_fixture"
         else:
             verdict = "no_overall_dyops_advantage_demonstrated"
-        out[baseline] = {
+        legacy[baseline] = {
             "verdict": verdict,
             "basis": (
                 f"held-out event recall {dr} vs {br}; false alerts/instrument-day "
                 f"{df} vs {bf}; mean alert duration {dd}s vs {bd}s"
+            ),
+        }
+    out = dict(legacy)
+    if "dyops_regime" in results:
+        out.update(
+            _compare(
+                "dyops_regime",
+                ("absolute_basis", "rolling_z", "ewma_z", "slow_drift"),
+            )
+        )
+        # Direct regime vs production sentinel.
+        rm = results["dyops_regime"]["metrics"]
+        cm = results["dyops_current"]["metrics"]
+        out["dyops_regime_vs_dyops_current"] = {
+            "verdict": (
+                "regime_improves_slow_drift_coverage_on_this_fixture"
+                if (rm.get("event_recall") or 0) >= (cm.get("event_recall") or 0)
+                and (rm.get("false_alerts_per_instrument_day") or 0)
+                <= (cm.get("false_alerts_per_instrument_day") or 0) + 1e-9
+                else "regime_tradeoff_vs_current_on_this_fixture"
+            ),
+            "basis": (
+                f"regime recall {rm.get('event_recall')} vs current "
+                f"{cm.get('event_recall')}; false alerts/instrument-day "
+                f"{rm.get('false_alerts_per_instrument_day')} vs "
+                f"{cm.get('false_alerts_per_instrument_day')}; "
+                f"mean alert duration {rm.get('mean_alert_duration_sec')}s vs "
+                f"{cm.get('mean_alert_duration_sec')}s"
             ),
         }
     return out
@@ -384,6 +480,33 @@ def evaluate(
         "dyops_current",
         current_factory,
         {"global": current_params},
+        dataset,
+        heldout,
+        warmup_events=warmup_events,
+    )
+    # Regime defaults match RegimeEngine production constants (shadow→active for scoring).
+    regime_default_params = {
+        "theta": 1.0,
+        "mahalanobis_threshold": 3.0,
+        "slow_short_window": 8,
+        "slow_long_window": 40,
+        "slow_threshold_bps": 8.0,
+        "slow_persist_ticks": 4,
+        "oracle_min_sign_flips": 5,
+        "oracle_max_abs_mean_basis_bps": 15.0,
+    }
+    detector_results["dyops_regime"] = _evaluate_configuration(
+        "dyops_regime",
+        factories["dyops_regime"],
+        {"global": global_params.get("dyops_regime", regime_default_params)},
+        dataset,
+        heldout,
+        warmup_events=warmup_events,
+    )
+    detector_results["dyops_regime_defaults"] = _evaluate_configuration(
+        "dyops_regime_defaults",
+        factories["dyops_regime"],
+        {"global": regime_default_params},
         dataset,
         heldout,
         warmup_events=warmup_events,
@@ -504,6 +627,13 @@ def evaluate(
                 "current_vs_slow_drift": {
                     "current": detector_results["dyops_current"]["metrics"],
                     "slow_drift": detector_results["slow_drift"]["metrics"],
+                },
+                "current_vs_regime": {
+                    "current": detector_results["dyops_current"]["metrics"],
+                    "regime_calibrated": detector_results["dyops_regime"]["metrics"],
+                    "regime_defaults": detector_results["dyops_regime_defaults"][
+                        "metrics"
+                    ],
                 },
             },
             "sensitivity": sensitivity,

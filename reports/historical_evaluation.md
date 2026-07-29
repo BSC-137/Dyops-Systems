@@ -1,6 +1,6 @@
 # Dyops Historical Evaluation Harness Report
 
-Generated at: `2026-07-22T12:52:02.431104+00:00`
+Generated at: `2026-07-29T13:50:36.064204+00:00`
 
 ## Evidence status
 
@@ -22,6 +22,8 @@ Generated at: `2026-07-22T12:52:02.431104+00:00`
 | slow_drift | 1.000 | 1.000 | 0.000 | 0.0 | 0.0 | 5.0 | 900.0 | 1050.0 |
 | dyops_observer_only | 1.000 | 0.667 | 24.407 | 0.0 | 0.0 | 101.0 | 420.0 | 600.0 |
 | dyops_current | 1.000 | 1.000 | 0.000 | 0.0 | 0.0 | 0.0 | 900.0 | 2400.0 |
+| dyops_regime | 1.000 | 1.000 | 0.000 | 0.0 | 0.0 | 4.0 | 900.0 | 1170.0 |
+| dyops_regime_defaults | 1.000 | 1.000 | 0.000 | 0.0 | 0.0 | 101.0 | 900.0 | 960.0 |
 | dyops_calibrated_global | 1.000 | 1.000 | 0.000 | 300.0 | 5.0 | 202.0 | 900.0 | 1200.0 |
 | dyops_calibrated_per_instrument | 1.000 | 1.000 | 0.000 | 300.0 | 5.0 | 202.0 | 900.0 | 1200.0 |
 
@@ -35,8 +37,17 @@ Event windows include their recorded uncertainty. Runtime and memory are availab
 - **rolling_mad:** `no_overall_dyops_advantage_demonstrated` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 48.813559322033896; mean alert duration 2400.0s vs 580.0s.
 - **cusum:** `no_overall_dyops_advantage_demonstrated` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 2400.0s vs 2400.0s.
 - **slow_drift:** `dyops_does_not_beat_baseline_on_this_fixture` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 2400.0s vs 1050.0s.
+- **dyops_regime_vs_absolute_basis:** `dyops_regime_beats_baseline_on_this_fixture` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 1320.0s.
+- **dyops_regime_vs_rolling_z:** `dyops_regime_does_not_beat_baseline_on_this_fixture` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 240.0s.
+- **dyops_regime_vs_ewma_z:** `dyops_regime_does_not_beat_baseline_on_this_fixture` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 120.0s.
+- **dyops_regime_vs_slow_drift:** `dyops_regime_does_not_beat_baseline_on_this_fixture` — held-out event recall 1.0 vs 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 1050.0s.
+- **dyops_regime_vs_dyops_current:** `regime_improves_slow_drift_coverage_on_this_fixture` — regime recall 1.0 vs current 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 2400.0s.
 
 These verdicts apply only to this held-out synthetic fixture. A tie or win here does not establish operational value on market history.
+
+## Deployment posture (regime layer)
+
+Regime layer does **not** dominate absolute_basis / rolling_z / ewma_z on this fixture (1/3 baseline wins). Keep live default in **shadow** mode (emit `regime_tag` / reasoning; do not elevate Peg Health band) until a stronger held-out story exists. Vs dyops_current: `regime_improves_slow_drift_coverage_on_this_fixture` — regime recall 1.0 vs current 1.0; false alerts/instrument-day 0.0 vs 0.0; mean alert duration 1170.0s vs 2400.0s. Scenario suite still requires `slow_peg_erosion` on `slow_drift` while sentinel `max_breaches` stays 0.
 
 ## Ablations included
 
@@ -44,6 +55,7 @@ These verdicts apply only to this held-out synthetic fixture. A tie or win here 
 - Production parameters versus globally and per-instrument calibrated parameters.
 - Replay warm-up sizes of 0, 10, 20, and 40 events.
 - Current Dyops policy versus an explicit slow-drift detector.
+- Current Dyops policy versus the deterministic Peg Health regime layer.
 - Sampling strides 2/3 and deterministic 10% missing-observation sensitivity.
 
 ## Data and label limitations

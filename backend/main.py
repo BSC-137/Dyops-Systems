@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from contextlib import asynccontextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -41,9 +41,11 @@ from peg_health import (  # noqa: E402
     apply_freshness,
     band_changed,
     build_peg_health,
+    measured_basis,
     replay_peg_health,
     watch_threshold,
 )
+from regime import RegimeEngine, regime_active_enabled, regime_implies_band  # noqa: E402
 from sentinel import (  # noqa: E402
     AUDIT_COOLDOWN_TICKS,
     AUDITS_DIR,
@@ -112,6 +114,7 @@ def _replay_history_events(
         theta=1.0,
         ring_buffer_capacity=1000,
     )
+    regime = RegimeEngine()
     plain_out: list[HistoryPoint] = []
     trace_out: list[HistoryTracePoint] = []
     thresh = float(MAHALANOBIS_BREACH)
@@ -125,6 +128,18 @@ def _replay_history_events(
             else float("nan")
         )
         h = observer.update(ts, phys, tok)
+        decision = regime.step(
+            measurement_valid=bool(h.measurement_valid),
+            basis=measured if math.isfinite(measured) else None,
+            innovation=float(h.innovation),
+            mahalanobis=float(h.mahalanobis_distance),
+            sentinel_level=(
+                "BREACH"
+                if h.measurement_valid and h.mahalanobis_distance > thresh
+                else "MONITORING"
+            ),
+            live=True,
+        )
         reasoning = _reasoning_row(
             h.measurement_valid,
             h.mahalanobis_distance,
@@ -147,7 +162,13 @@ def _replay_history_events(
         )
         plain_out.append(hp)
         trace_out.append(
-            HistoryTracePoint(**hp.model_dump(), reasoning=reasoning),
+            HistoryTracePoint(
+                **hp.model_dump(),
+                reasoning=reasoning,
+                regime_tag=decision.regime_tag,
+                regime_level=decision.level,
+                regime_reasoning=decision.reasoning,
+            ),
         )
     return plain_out, trace_out
 
@@ -254,6 +275,18 @@ def _peg_health_for_tick(
 ) -> dict[str, Any]:
     live, age = _freshness_for_runtime(runtime)
     previous = runtime.peg_health
+    basis = measured_basis(physical_price, token_price)
+    decision = runtime.regime.step(
+        measurement_valid=bool(result.health.measurement_valid),
+        basis=basis,
+        innovation=float(result.health.innovation),
+        mahalanobis=float(result.health.mahalanobis_distance),
+        sentinel_level=result.level.name,
+        live=live,
+        age_sec=age,
+        stale_cutoff_sec=STALE_CUTOFF_SEC,
+    )
+    runtime.last_regime = decision.to_dict()
     return build_peg_health(
         instrument_id=runtime.config.id,
         timestamp=timestamp,
@@ -272,6 +305,9 @@ def _peg_health_for_tick(
         previous_transition=(
             previous.get("last_transition") if previous else None
         ),
+        regime_tag_override=decision.regime_tag,
+        regime_band_elevation=regime_implies_band(decision),
+        regime_reasoning=decision.reasoning,
     )
 
 
@@ -414,6 +450,8 @@ class InstrumentRuntime:
     criticality_recent_pct: float = 0.0
     ingestion_source: str = "none"
     peg_health: dict[str, Any] | None = None
+    regime: RegimeEngine = field(default_factory=RegimeEngine)
+    last_regime: dict[str, Any] | None = None
 
 
 _instrument_runtimes: dict[str, InstrumentRuntime] = {}
@@ -720,6 +758,8 @@ async def _telemetry_pump() -> None:
         model["session_event_index"] = runtime.session_event_count
         model["ingestion_source"] = ingestion_source
         model["peg_health"] = peg
+        if runtime.last_regime is not None:
+            model["regime"] = runtime.last_regime
         if demo_scenario is not None:
             model["demo_scenario"] = demo_scenario
         simulated_webhooks = os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1"
@@ -826,6 +866,8 @@ class StatusResponse(BaseModel):
     demo_webhooks_enabled: bool
     feed_disabled: bool
     software_version: str
+    regime_mode: str
+    regime_active_enabled: bool
 
 
 class PegHealthFreshness(BaseModel):
@@ -964,6 +1006,8 @@ async def api_status() -> StatusResponse:
         demo_webhooks_enabled=os.environ.get("DYOPS_DEMO_WEBHOOKS") == "1",
         feed_disabled=feed_threads_disabled(),
         software_version=SOFTWARE_VERSION,
+        regime_mode="active" if regime_active_enabled() else "shadow",
+        regime_active_enabled=regime_active_enabled(),
     )
 
 
@@ -1093,6 +1137,8 @@ async def reset_demo(
         runtime.criticality_recent_pct = 0.0
         runtime.ingestion_source = "none"
         runtime.peg_health = None
+        runtime.regime = RegimeEngine()
+        runtime.last_regime = None
         if runtime.config.id == _primary_instrument_id:
             _sentinel = runtime.sentinel
             _session_event_count = 0
@@ -1118,9 +1164,12 @@ class HistoryPoint(BaseModel):
 
 
 class HistoryTracePoint(HistoryPoint):
-    """Replay row plus deterministic statistical reasoning (no Gemini)."""
+    """Replay row plus deterministic statistical + regime reasoning (no Gemini)."""
 
     reasoning: str
+    regime_tag: str | None = None
+    regime_level: str | None = None
+    regime_reasoning: str | None = None
 
 
 class HistoryTraceBundle(BaseModel):

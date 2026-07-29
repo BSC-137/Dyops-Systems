@@ -94,12 +94,20 @@ def regime_tag_for(
     *,
     measurement_valid: bool,
     live: bool,
+    regime_override: str | None = None,
 ) -> str:
-    """Stable regime tags for dashboards and webhooks (no probability language)."""
+    """
+    Partner-facing regime tag.
+
+    When a RegimeEngine decision is available, prefer its tag (issuer-relevant
+    failure modes). Otherwise fall back to band/freshness mapping.
+    """
     if not live:
         return "stale"
-    if not measurement_valid:
+    if not measurement_valid and not regime_override:
         return "measurement_withheld"
+    if regime_override:
+        return regime_override
     if band == _BAND_AUDIT:
         return "escalated_review"
     if band == _BAND_BREACH:
@@ -107,6 +115,25 @@ def regime_tag_for(
     if band == _BAND_WATCH:
         return "elevated_surprise"
     return "nominal"
+
+
+def _band_rank(band: str) -> int:
+    order = {
+        _BAND_HEALTHY: 0,
+        _BAND_WATCH: 1,
+        _BAND_BREACH: 2,
+        _BAND_AUDIT: 3,
+    }
+    return order.get(band, 0)
+
+
+def merge_band_with_regime(sentinel_band: str, regime_band: str | None) -> str:
+    """Active mode: elevate Peg Health band to the worse of sentinel vs regime."""
+    if regime_band is None:
+        return sentinel_band
+    if _band_rank(regime_band) > _band_rank(sentinel_band):
+        return regime_band
+    return sentinel_band
 
 
 def _narrative(
@@ -214,6 +241,9 @@ def build_peg_health(
     stale_cutoff_sec: float,
     previous_band: str | None = None,
     previous_transition: Mapping[str, Any] | None = None,
+    regime_tag_override: str | None = None,
+    regime_band_elevation: str | None = None,
+    regime_reasoning: str | None = None,
 ) -> dict[str, Any]:
     """Assemble a versioned Peg Health snapshot (JSON-serializable)."""
     band = classify_band(
@@ -222,6 +252,7 @@ def build_peg_health(
         measurement_valid=measurement_valid,
         breach_threshold=breach_threshold,
     )
+    band = merge_band_with_regime(band, regime_band_elevation)
     m = _finite_or_none(mahalanobis)
     basis = measured_basis(physical_price, token_price)
     fb = _finite_or_none(filtered_basis)
@@ -233,6 +264,11 @@ def build_peg_health(
         measurement_valid=measurement_valid,
         breach_threshold=breach_threshold,
     )
+    if regime_reasoning:
+        explainability = _clip(
+            f"{explainability} {regime_reasoning}",
+            _EXPLAIN_MAX,
+        )
     return {
         "schema_version": PEG_HEALTH_SCHEMA_VERSION,
         "instrument_id": instrument_id,
@@ -251,6 +287,7 @@ def build_peg_health(
             band,
             measurement_valid=measurement_valid,
             live=live,
+            regime_override=regime_tag_override,
         ),
         "summary": summary,
         "explainability": explainability,
@@ -320,10 +357,22 @@ def apply_freshness(
     }
     measurement_valid = bool(out.get("measurement_valid", True))
     band = str(out["band"])
+    prior_tag = str(out.get("regime_tag") or "")
+    # Preserve issuer regime tags when still live; only force stale/withheld overlays.
+    issuer_tags = {
+        "sudden_dislocation",
+        "slow_peg_erosion",
+        "feed_oracle_fault",
+        "nominal",
+        "elevated_surprise",
+        "escalated_review",
+    }
+    override = prior_tag if live and prior_tag in issuer_tags else None
     out["regime_tag"] = regime_tag_for(
         band,
         measurement_valid=measurement_valid,
         live=live,
+        regime_override=override,
     )
     mah = out.get("mahalanobis")
     mah_f = float(mah) if mah is not None and math.isfinite(float(mah)) else None
@@ -372,6 +421,7 @@ def replay_peg_health(
         )
 
     import dyops_core
+    from regime import RegimeEngine, regime_implies_band
     from sentinel import DyopsSentinel
 
     observer = dyops_core.BasisObserver(
@@ -385,6 +435,7 @@ def replay_peg_health(
         persistence=None,
         instrument_id=instrument_id,
     )
+    engine = RegimeEngine(mahalanobis_breach=float(breach_threshold))
 
     peg: dict[str, Any] | None = None
     previous_band: str | None = None
@@ -404,6 +455,17 @@ def replay_peg_health(
                 str(row["scenario"]) if row.get("scenario") is not None else None
             ),
         )
+        basis = measured_basis(phys, tok)
+        decision = engine.step(
+            measurement_valid=bool(result.health.measurement_valid),
+            basis=basis,
+            innovation=float(result.health.innovation),
+            mahalanobis=float(result.health.mahalanobis_distance),
+            sentinel_level=result.level.name,
+            live=live,
+            age_sec=age_sec,
+            stale_cutoff_sec=stale_cutoff_sec,
+        )
         peg = build_peg_health(
             instrument_id=instrument_id,
             timestamp=ts,
@@ -420,6 +482,9 @@ def replay_peg_health(
             stale_cutoff_sec=stale_cutoff_sec,
             previous_band=previous_band,
             previous_transition=previous_transition,
+            regime_tag_override=decision.regime_tag,
+            regime_band_elevation=regime_implies_band(decision),
+            regime_reasoning=decision.reasoning,
         )
         previous_band = str(peg["band"])
         previous_transition = peg.get("last_transition")

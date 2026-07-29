@@ -10,6 +10,7 @@ from dataclasses import asdict, dataclass
 from typing import Any, Callable
 
 import dyops_core
+from regime import RegimeEngine
 from sentinel import DyopsSentinel, SentinelLevel
 
 from .base import Scenario
@@ -27,6 +28,10 @@ class TickResult:
     mahalanobis: float | None
     innovation: float | None
     criticality_recent_pct: float | None
+    regime_tag: str | None = None
+    regime_level: str | None = None
+    regime_reasoning: str | None = None
+    regime_mode: str | None = None
 
 
 @dataclass(frozen=True)
@@ -169,6 +174,7 @@ def run_scenario(
         ring_buffer_capacity=1000,
     )
     sentinel = sentinel_factory(observer)
+    regime = RegimeEngine()
     ticks: list[TickResult] = []
     first_audit_snapshot_size_bytes: int | None = None
     started = time.perf_counter()
@@ -190,19 +196,41 @@ def run_scenario(
                     separators=(",", ":"),
                 ).encode("utf-8")
             )
+        valid = bool(event.health.measurement_valid)
+        basis = None
+        if (
+            valid
+            and physical > 0.0
+            and token > 0.0
+            and math.isfinite(physical)
+            and math.isfinite(token)
+        ):
+            basis = math.log(physical / token)
+        decision = regime.step(
+            measurement_valid=valid,
+            basis=basis,
+            innovation=_finite_or_none(event.health.innovation),
+            mahalanobis=_finite_or_none(event.health.mahalanobis_distance),
+            sentinel_level=event.level.name,
+            live=True,
+        )
         ticks.append(
             TickResult(
                 tick=tick,
                 timestamp=timestamp,
                 physical_price=_finite_or_none(physical),
                 token_price=_finite_or_none(token),
-                measurement_valid=bool(event.health.measurement_valid),
+                measurement_valid=valid,
                 level=event.level.name,
                 mahalanobis=_finite_or_none(event.health.mahalanobis_distance),
                 innovation=_finite_or_none(event.health.innovation),
                 criticality_recent_pct=_finite_or_none(
                     event.criticality_recent_pct
                 ),
+                regime_tag=decision.regime_tag,
+                regime_level=decision.level,
+                regime_reasoning=decision.reasoning,
+                regime_mode=decision.mode,
             )
         )
 

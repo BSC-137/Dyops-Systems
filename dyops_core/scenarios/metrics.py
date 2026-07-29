@@ -185,6 +185,49 @@ def compute_extended_metrics(
         ),
         "snapshot_size_bytes": first_audit_snapshot_size_bytes,
         "return_to_monitoring_tick": return_to_monitoring_tick,
+        **_regime_metrics(ticks, anomaly_start, has_anomaly_label),
+    }
+
+
+def _regime_metrics(
+    ticks: Sequence[TickLike],
+    anomaly_start: int,
+    has_anomaly_label: bool,
+) -> dict[str, Any]:
+    """Additive regime-layer counters (shadow-safe; does not alter sentinel gates)."""
+
+    def tag(tick: TickLike) -> str | None:
+        return getattr(tick, "regime_tag", None)
+
+    slow = [t for t in ticks if tag(t) == "slow_peg_erosion"]
+    sudden = [t for t in ticks if tag(t) == "sudden_dislocation"]
+    feed = [t for t in ticks if tag(t) == "feed_oracle_fault"]
+    elevated = [
+        t
+        for t in ticks
+        if tag(t)
+        in {
+            "slow_peg_erosion",
+            "sudden_dislocation",
+            "feed_oracle_fault",
+            "elevated_surprise",
+            "escalated_review",
+        }
+    ]
+    pre_alerts = (
+        sum(1 for t in elevated if t.tick < anomaly_start)
+        if has_anomaly_label
+        else 0
+    )
+    return {
+        "regime_slow_erosion_ticks": len(slow),
+        "regime_sudden_dislocation_ticks": len(sudden),
+        "regime_feed_fault_ticks": len(feed),
+        "regime_elevated_ticks": len(elevated),
+        "regime_alerts_pre_anomaly": pre_alerts,
+        "first_regime_slow_erosion_tick": slow[0].tick if slow else None,
+        "first_regime_sudden_dislocation_tick": sudden[0].tick if sudden else None,
+        "first_regime_feed_fault_tick": feed[0].tick if feed else None,
     }
 
 
@@ -257,5 +300,29 @@ def evaluate_thresholds(
         actual = metrics["return_to_monitoring_tick"]
         if actual is None:
             fail("return_to_monitoring_tick", actual, "to be", "an integer")
+
+    if "min_regime_slow_erosion_ticks" in thresholds:
+        actual = int(metrics.get("regime_slow_erosion_ticks") or 0)
+        minimum = int(thresholds["min_regime_slow_erosion_ticks"])
+        if actual < minimum:
+            fail("regime_slow_erosion_ticks", actual, ">=", minimum)
+
+    if "min_regime_sudden_dislocation_ticks" in thresholds:
+        actual = int(metrics.get("regime_sudden_dislocation_ticks") or 0)
+        minimum = int(thresholds["min_regime_sudden_dislocation_ticks"])
+        if actual < minimum:
+            fail("regime_sudden_dislocation_ticks", actual, ">=", minimum)
+
+    if "min_regime_feed_fault_or_elevated_ticks" in thresholds:
+        actual = int(metrics.get("regime_elevated_ticks") or 0)
+        minimum = int(thresholds["min_regime_feed_fault_or_elevated_ticks"])
+        if actual < minimum:
+            fail("regime_elevated_ticks", actual, ">=", minimum)
+
+    if "max_regime_alerts_pre_anomaly" in thresholds:
+        actual = int(metrics.get("regime_alerts_pre_anomaly") or 0)
+        maximum = int(thresholds["max_regime_alerts_pre_anomaly"])
+        if actual > maximum:
+            fail("regime_alerts_pre_anomaly", actual, "<=", maximum)
 
     return failures

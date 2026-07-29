@@ -40,7 +40,10 @@ lint/build, and a Docker Compose smoke test on every pull request to `main`.**
 ## What Dyops does
 
 - **Exposes Peg Health** as the partner-facing object: `GET /api/peg_health?instrument=`
-  and additive `peg_health` on `/ws/telemetry` (`schema_version: "1.0"`).
+  and additive `peg_health` on `/ws/telemetry` (`schema_version: "1.0"`), including a
+  deterministic **regime layer** (`sudden_dislocation` / `slow_peg_erosion` /
+  `feed_oracle_fault`) in **shadow mode by default** (`DYOPS_REGIME_ACTIVE=1` for
+  optional Peg Health band elevation).
 - **Ingests** named paired instruments over concurrent **Binance WebSockets**, with one observer/sentinel state per instrument.
 - **Filters** log-basis with a **`BasisObserver`** implemented in **Rust** (PyO3), exposed to Python — Kalman-style updates with **`filtered_basis`**, **`innovation`**, **`mahalanobis_distance`**, **`measurement_valid`**.
 - **Policies** (`DyopsSentinel`): breach when Mahalanobis exceeds **`MAHALANOBIS_BREACH`** (default `3.0`); **Watch** when Mahalanobis exceeds half that threshold; **AUDIT** when rolling **criticality** over a finite window crosses a configurable threshold. Peg Health bands map these signals.

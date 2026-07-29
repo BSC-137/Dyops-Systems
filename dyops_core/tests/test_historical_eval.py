@@ -196,6 +196,7 @@ class EndToEndHarnessTests(unittest.TestCase):
         result = self.result
         self.assertEqual(result["evidence_class"], "synthetic_regression_fixture")
         self.assertIn("dyops_current", result["detectors"])
+        self.assertIn("dyops_regime", result["detectors"])
         self.assertIn("absolute_basis", result["detectors"])
         self.assertIn("rolling_z", result["detectors"])
         self.assertIn("rolling_mad", result["detectors"])

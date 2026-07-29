@@ -86,6 +86,8 @@ export interface StatusResponse {
   mahalanobis_breach_threshold: number
   peg_health_watch_threshold?: number
   peg_health_schema_version?: string
+  regime_mode?: "shadow" | "active"
+  regime_active_enabled?: boolean
   criticality_window_events: number
   criticality_audit_pct: number
   audit_cooldown_ticks: number
@@ -125,6 +127,9 @@ export interface HistoryTracePoint {
   mahalanobis: number
   valid: boolean
   reasoning: string
+  regime_tag?: string | null
+  regime_level?: string | null
+  regime_reasoning?: string | null
 }
 
 export interface AuditRow {

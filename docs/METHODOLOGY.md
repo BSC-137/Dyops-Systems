@@ -102,18 +102,52 @@ reported BREACH ticks inside the labeled anomaly window. Runtime per 1,000 ticks
 reported as operational context, but is host-dependent and is not a fixed service-level
 guarantee.
 
-The current threshold set intentionally records two limitations. `slow_drift` does not
-breach under the present production observer settings and remains gated to zero
-breaches. **TODO (Option B):** require a breach if the product policy is changed to
-promise slow-drift alarms; no such change is made by the current thresholds.
+The sentinel Mahalanobis gate intentionally remains silent on `slow_drift` under
+production settings (`max_breaches: 0`). Issuer-relevant creeping erosion is handled
+by the **deterministic regime layer** (below), which must emit
+`slow_peg_erosion` on that scenario while keeping sentinel breaches at zero in the
+default demo path.
 
 `oracle_lag` permits transient breaches, requires the first post-lag breach within 20
 ticks, and caps full-run AUDIT occupancy at `90%`. The cap is intentionally close to
 the current deterministic result because operational lag is audit-heavy; it establishes
 a regression bound rather than claiming that the behavior is already optimal.
+The regime layer additionally labels oscillating lag patterns when they match
+`feed_oracle_fault` / elevated-regime rules (see Regime layer).
 `fat_tail_noise` requires at least one breach from tick 92 onward and zero pre-window
 false-positive rate. Together these gates distinguish tolerated operational lag from
 the required response to labeled heavy-tail stress.
+
+## Regime layer (deterministic; shadow by default)
+
+The regime layer (`dyops_core/regime.py`) classifies issuer-relevant failure modes
+that static “basis > X bps” and simple rolling z-scores routinely confuse:
+
+| Tag | Meaning | Exact rule (defaults) |
+|-----|---------|------------------------|
+| `sudden_dislocation` | Abrupt peg break | Valid tick with Mahalanobis `> 3.0` and either ≥2 same-sign innovation ticks while breached, or `|short-mean basis| > 15` bps (distinguishes from oscillating oracle noise). |
+| `slow_peg_erosion` | Creeping peg drift | After a long window of 40 basis samples, `|mean(recent 8) − mean(oldest 8)| × 1e4 > 8` bps for ≥4 consecutive ticks. Fires even when Mahalanobis stays below 3.0. |
+| `feed_oracle_fault` | Operational data/oracle issue | ≥2 consecutive invalid prices, **or** Mahalanobis breach with ≥5 innovation sign-flips in a 12-tick window while `|short-mean basis| ≤ 15` bps. |
+| `nominal` / `elevated_surprise` / `escalated_review` | Pass-through | No named regime; may mirror sentinel elevation without claiming a peg-break class. |
+| `stale` / `measurement_withheld` | Freshness / validity overlays | Wall-clock stale or single invalid tick before the invalid streak fault. |
+
+Each tick emits `regime_tag`, recommended `level` (`MONITORING`/`BREACH`/`AUDIT`), and
+readable `reasoning`. Gemini never alters these fields.
+
+**Modes**
+
+- **Shadow (default):** always computed and attached to Peg Health `regime_tag`,
+  `/ws/telemetry` `regime`, and `/api/history/trace` (`regime_tag`,
+  `regime_level`, `regime_reasoning`). Does **not** change sentinel BREACH/AUDIT
+  counts or Peg Health band. Demo path unchanged.
+- **Active (`DYOPS_REGIME_ACTIVE=1`):** regime recommendations may elevate Peg Health
+  band (`Watch`/`Breach`/`Audit`) via `regime_implies_band`. Sentinel policy itself
+  remains the Mahalanobis/criticality ladder unless partners route on Peg Health.
+
+**Claim boundary:** regime tags are operational classifications for monitoring and
+forensics. They are not default probabilities, not attestation, and not a guarantee
+of detecting every peg event. Held-out historical_eval comparisons vs
+`absolute_basis` / `rolling_z` / `ewma_z` are fixture-scoped evidence only.
 
 ## Deterministic and optional components
 
@@ -123,6 +157,7 @@ and scenario seed:
 - synthetic price streams and anomaly labels;
 - Rust observer state updates and batch replay;
 - Mahalanobis breach and rolling criticality rules;
+- regime-layer tags, levels, and reasoning;
 - threshold evaluation and all metrics except wall-clock processing time;
 - audit snapshot construction.
 
@@ -130,7 +165,7 @@ Gemini is optional and is not invoked by the robustness suite. In production, th
 `AgenticAuditor` may send an AUDIT snapshot to Gemini to produce a narrative,
 structured risk assessment. That model output can vary and is not part of scenario
 pass/fail status. The deterministic MONITORING, BREACH, and AUDIT classification does
-not depend on Gemini.
+not depend on Gemini. Peg Health regime tags do not depend on Gemini.
 
 `gemini_configured` means an API key is present. `gemini_ready` means only that the
 local auditor client initialized; neither field proves endpoint reachability. Injected
@@ -178,3 +213,19 @@ This writes `reports/robustness_report.json` and
 cd dyops_core
 python -m scenarios.run --all
 ```
+
+Historical evaluation (tuning-only calibration; held-out scoring; leakage guards):
+
+```bash
+cd dyops_core
+python -m historical_eval.cli evaluate \
+  --dataset historical_eval/fixtures/synthetic_reference.csv \
+  --catalog historical_eval/manifests/synthetic_reference.events.json \
+  --markdown-output ../reports/historical_evaluation.md \
+  --json-output ../reports/historical_evaluation.json
+```
+
+Compare `dyops_current` (sentinel-only) vs `dyops_regime` (observer + regime layer)
+against `absolute_basis` / `rolling_z` / `ewma_z`. If the regime layer does not beat
+baselines honestly on the fixture, keep live default in **shadow** mode and document
+the gap in the report recommendations — do not claim a win.

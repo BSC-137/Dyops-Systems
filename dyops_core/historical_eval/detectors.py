@@ -559,6 +559,136 @@ class DyopsDetector(Detector):
         )
 
 
+class DyopsRegimeDetector(Detector):
+    """
+    Production observer + deterministic RegimeEngine (active alert semantics).
+
+    Used for held-out comparison: alerts on sudden_dislocation, slow_peg_erosion,
+    and feed_oracle_fault. Shadow mode is the live default; this detector evaluates
+    the active classification rules fairly against baselines.
+    """
+
+    name = "dyops_regime"
+
+    def __init__(
+        self,
+        *,
+        theta: float = 1.0,
+        mahalanobis_threshold: float = 3.0,
+        slow_short_window: int = 8,
+        slow_long_window: int = 40,
+        slow_threshold_bps: float = 8.0,
+        slow_persist_ticks: int = 4,
+        oracle_min_sign_flips: int = 5,
+        oracle_max_abs_mean_basis_bps: float = 15.0,
+        warmup_events: int = 0,
+    ) -> None:
+        super().__init__(warmup_events=warmup_events)
+        self.theta = theta
+        self.mahalanobis_threshold = mahalanobis_threshold
+        self.slow_short_window = slow_short_window
+        self.slow_long_window = slow_long_window
+        self.slow_threshold_bps = slow_threshold_bps
+        self.slow_persist_ticks = slow_persist_ticks
+        self.oracle_min_sign_flips = oracle_min_sign_flips
+        self.oracle_max_abs_mean_basis_bps = oracle_max_abs_mean_basis_bps
+        self._observer: Any = None
+        self._regime: Any = None
+
+    def reset(self) -> None:
+        from regime import RegimeEngine
+
+        super().reset()
+        self._observer = dyops_core.BasisObserver(
+            name="historical-eval-dyops-regime",
+            theta=self.theta,
+            ring_buffer_capacity=1000,
+        )
+        self._regime = RegimeEngine(
+            slow_short_window=self.slow_short_window,
+            slow_long_window=self.slow_long_window,
+            slow_threshold_bps=self.slow_threshold_bps,
+            slow_persist_ticks=self.slow_persist_ticks,
+            mahalanobis_breach=self.mahalanobis_threshold,
+            oracle_min_sign_flips=self.oracle_min_sign_flips,
+            oracle_max_abs_mean_basis_bps=self.oracle_max_abs_mean_basis_bps,
+            mode="active",
+        )
+
+    def parameters(self) -> dict[str, Any]:
+        return {
+            **super().parameters(),
+            "theta": self.theta,
+            "mahalanobis_threshold": self.mahalanobis_threshold,
+            "slow_short_window": self.slow_short_window,
+            "slow_long_window": self.slow_long_window,
+            "slow_threshold_bps": self.slow_threshold_bps,
+            "slow_persist_ticks": self.slow_persist_ticks,
+            "oracle_min_sign_flips": self.oracle_min_sign_flips,
+            "oracle_max_abs_mean_basis_bps": self.oracle_max_abs_mean_basis_bps,
+        }
+
+    def step(self, tick: int, row: Observation) -> DetectionTick:
+        health = self._observer.update(
+            row.timestamp,
+            row.physical_price,
+            row.token_price,
+        )
+        basis = _basis(row)
+        decision = self._regime.step(
+            measurement_valid=bool(health.measurement_valid),
+            basis=basis,
+            innovation=float(health.innovation) if health.measurement_valid else None,
+            mahalanobis=(
+                float(health.mahalanobis_distance)
+                if health.measurement_valid
+                else None
+            ),
+            sentinel_level=(
+                "BREACH"
+                if health.measurement_valid
+                and health.mahalanobis_distance > self.mahalanobis_threshold
+                else "MONITORING"
+            ),
+            live=True,
+        )
+        if health.measurement_valid:
+            self._valid_seen += 1
+        alert_tags = {
+            "sudden_dislocation",
+            "slow_peg_erosion",
+            "feed_oracle_fault",
+        }
+        alert = (
+            decision.regime_tag in alert_tags
+            and self._valid_seen > self.warmup_events
+        )
+        level = decision.level if alert else "MONITORING"
+        if level == "MONITORING" and alert:
+            level = "BREACH"
+        return DetectionTick(
+            self.name,
+            row.instrument_id,
+            tick,
+            row.timestamp,
+            bool(health.measurement_valid),
+            basis if health.measurement_valid else None,
+            decision.score_bps
+            if decision.score_bps is not None
+            else (
+                float(health.mahalanobis_distance)
+                if health.measurement_valid
+                else None
+            ),
+            level if level in {"MONITORING", "BREACH", "AUDIT"} else "BREACH",
+            {
+                "regime_tag": decision.regime_tag,
+                "regime_reasoning": decision.reasoning,
+                "regime_mode": decision.mode,
+            },
+        )
+
+
 def ticks_to_alerts(
     ticks: list[DetectionTick],
     *,
